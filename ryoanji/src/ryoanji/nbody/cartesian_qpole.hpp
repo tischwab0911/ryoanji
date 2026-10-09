@@ -370,17 +370,18 @@ HOST_DEVICE_FUN void addQuadrupole(CartesianMDQpole<T>& composite, Vec3<Tc> dX, 
 
     Tc ml = addend[Cqi::mass] * 3;
 
-    composite[Cqi::trace] = composite[Cqi::trace] + addend[Cqi::trace] + ml * r_2;
+    Tc px     = addend[Cqi::px];
+    Tc py     = addend[Cqi::py];
+    Tc pz     = addend[Cqi::pz];
+    Tc dipsum = rx * px + ry * py + rz * pz;
+
+    // tr(sum m r'r'^T) with r' = r - dX: tr + M dX^2 - 2 p.dX
+    composite[Cqi::trace] = composite[Cqi::trace] + addend[Cqi::trace] + ml * r_2 - 2.0 * dipsum;
 
     composite[Cqi::mass] += addend[Cqi::mass];
     composite[Cqi::px] += addend[Cqi::px] - addend[Cqi::mass] * rx;
     composite[Cqi::py] += addend[Cqi::py] - addend[Cqi::mass] * ry;
     composite[Cqi::pz] += addend[Cqi::pz] - addend[Cqi::mass] * rz;
-
-    Tc px     = addend[Cqi::px];
-    Tc py     = addend[Cqi::py];
-    Tc pz     = addend[Cqi::pz];
-    Tc dipsum = rx * px + ry * py + rz * pz;
 
     composite[Cqi::qxx] += addend[Cqi::qxx] + ml * (rx_2 - r_2) - 6.0 * rx * px + 2.0 * dipsum;
     composite[Cqi::qxy] += addend[Cqi::qxy] + ml * rx * ry - 3.0 * (rx * py + ry * px);

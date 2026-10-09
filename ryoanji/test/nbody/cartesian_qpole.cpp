@@ -221,6 +221,7 @@ TEST(Gravity, CartesianMDQ_M2M)
     EXPECT_NEAR(reference[Cqi::px], composite[Cqi::px], 1e-10);
     EXPECT_NEAR(reference[Cqi::py], composite[Cqi::py], 1e-10);
     EXPECT_NEAR(reference[Cqi::pz], composite[Cqi::pz], 1e-10);
+    EXPECT_NEAR(reference[Cqi::trace], composite[Cqi::trace], 1e-10);
 
     // compare accelerations by reference and composite multipole on a test target
     util::array<T, 3> target{-8, 0, 0};
