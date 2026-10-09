@@ -57,8 +57,8 @@ TEST(Ewald, MatchCpu)
     thrust::device_vector<T> d_x = x, d_y = y, d_z = z, d_m = m, d_h = h;
     thrust::device_vector<T> p(numBodies), ax(numBodies), ay(numBodies), az(numBodies);
 
-    GroupData<GpuTag> groups;
-    computeFixedGroups(0, numBodies, GpuConfig::warpSize, groups);
+    GroupData<execution::Gpu> groups;
+    computeFixedGroups(execution::gpuDefaultStream, 0, numBodies, GpuConfig::warpSize, groups);
 
     T utot = 0;
     computeGravityEwaldGpu(makeVec3(centerMass), rootMultipole, groups.view(), rawPtr(d_x), rawPtr(d_y), rawPtr(d_z),
@@ -74,7 +74,7 @@ TEST(Ewald, MatchCpu)
 
     EXPECT_NEAR(utotRef, utot, 1e-7);
 
-    for (int i = 0; i < numBodies; ++i)
+    for (std::size_t i = 0; i < numBodies; ++i)
     {
         EXPECT_NEAR(h_p[i], refP[i], 1e-6);
         EXPECT_NEAR(h_ax[i], refAx[i], 1e-6);

@@ -421,7 +421,7 @@ __global__ __launch_bounds__(TravConfig::numThreads) void traverseKernel(
     // warp-common global mem storage
     int* cellQueue = gmPool + TravConfig::memPerWarp * ((blockIdx.x * numWarpsPerBlock) + warpIdx);
 
-    int targetIdx = 0;
+    LocalIndex targetIdx = 0;
 
     while (true)
     {
@@ -563,9 +563,10 @@ double traverse(cstone::GroupView grp, const int initNodeIdx, const Tc* __restri
     numBlocks            = std::min(numBlocks, TravConfig::maxNumActiveBlocks);
 
     resetTraversalCounters<<<1, 1>>>();
-    traverseKernel<<<numBlocks, TravConfig::numThreads>>>(grp, initNodeIdx, xt, yt, zt, mt, ht, xs, ys, zs, ms, hs,
-                                                          childOffsets, internalToLeaf, layout, sourceCenter,
-                                                          multipoles, G, numShells, boxL, p, ax, ay, az, gmPool);
+    if (numBlocks > 0)
+        traverseKernel<<<numBlocks, TravConfig::numThreads>>>(grp, initNodeIdx, xt, yt, zt, mt, ht, xs, ys, zs, ms, hs,
+                                                              childOffsets, internalToLeaf, layout, sourceCenter,
+                                                              multipoles, G, numShells, boxL, p, ax, ay, az, gmPool);
     float totalPotential;
     checkGpuErrors(cudaMemcpyFromSymbol(&totalPotential, GPU_SYMBOL(totalPotentialGlob), sizeof(float)));
     return 0.5 * Tc(G) * totalPotential;
