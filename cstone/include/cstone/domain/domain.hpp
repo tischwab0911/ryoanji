@@ -31,6 +31,8 @@
 #include "cstone/sfc/sfc_gpu.h"
 #include "cstone/util/reallocate.hpp"
 #include "cstone/util/type_list.hpp"
+#include <stdexcept>
+#include <string>
 
 namespace cstone
 {
@@ -210,6 +212,10 @@ public:
             if (fail && myRank_ == 0) { std::cout << "LET refine, mode=" << fail << std::endl; }
         } while (fail && maxRep--);
 
+        // Continuing with an inconsistent layout loses or duplicates particles and lets the
+        // gravity traversal approximate missing near-field leaves by their multipoles.
+        if (fail) { throw std::runtime_error("cstone: LET refinement did not converge (mode " + std::to_string(fail) + ")"); }
+
         updateLayout(sorter, keyView, particleKeys, std::tie(x, y, z, h), particleProperties, scratch);
         setupHalos(particleKeys, x, y, z, h, scratch);
         firstCall_ = false;
@@ -276,6 +282,10 @@ public:
 
             if (fail && myRank_ == 0) { std::cout << "LET refine, mode=" << fail << std::endl; }
         } while (fail && maxRep--);
+
+        // Continuing with an inconsistent layout loses or duplicates particles and lets the
+        // gravity traversal approximate missing near-field leaves by their multipoles.
+        if (fail) { throw std::runtime_error("cstone: LET refinement did not converge (mode " + std::to_string(fail) + ")"); }
 
         // diagnostics(keyView.size());
 

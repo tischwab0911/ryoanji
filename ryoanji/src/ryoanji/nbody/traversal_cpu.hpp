@@ -94,7 +94,10 @@ void computeGravityGroup(const util::array<Vec4<T1>, N>& target, const TreeNodeI
         // because target group particle bounding boxes may protrude outside the assigned SFC domain.
         // In this case we may nevertheless apply M2P because the protruding part that caused the mac to fail
         // must have contained no particles, because particles can only be inside the SFC domain.
-        bool isRemote = leafIdx >= 0 && layout[leafIdx] == layout[leafIdx + 1] && mp[Cqi::mass] > 0;
+        // The cell is recognized by a non-zero MAC radius (set iff sum |m| != 0), not by its multipole
+        // mass: with signed charges (e.g. image charges) a leaf with sources can have net mass exactly
+        // zero but a non-zero dipole. An empty leaf has a zero MAC radius.
+        bool isRemote = leafIdx >= 0 && layout[leafIdx] == layout[leafIdx + 1] && com[3] != 0;
 
         if (!violatesMac || isRemote)
         {

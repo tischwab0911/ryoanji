@@ -240,7 +240,10 @@ __device__ util::tuple<unsigned, unsigned, unsigned>
         if (stackUsed > TravConfig::memPerWarp) { return {0xFFFFFFFF, 0xFFFFFFFF, maxStack}; }
 
         // Multipole approximation
-        const bool isRemote    = layout[leafIdx + 1] == layout[leafIdx] && Multipoles[sourceQueue][Cqi::mass] > 0;
+        // A remote leaf is recognized by a non-zero MAC radius (set iff sum |m| != 0), not by its
+        // multipole mass: with signed charges (e.g. image charges) a leaf with sources can have net
+        // mass exactly zero but a non-zero dipole. An empty leaf has a zero MAC radius.
+        const bool isRemote    = layout[leafIdx + 1] == layout[leafIdx] && MAC[3] != Tf(0);
         const bool isApprox    = (!isClose || (!isNode && isRemote)) && isSource; // Source cell can be used for M2P
         int        numKeepWarp = streamCompact(&sourceQueue, isApprox, tempQueue);
         // push valid approx source cell indices into approxQueue
