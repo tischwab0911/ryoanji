@@ -2,6 +2,7 @@ include(cstone_add_test)
 
 set(UNIT_TEST_SOURCES_GPU
         cuda/device_vector.cu
+        cuda/memory.cu
         domain/domaindecomp_gpu.cu
         halos/gather_halos_gpu.cu
         primitives/clz.cu
@@ -13,25 +14,22 @@ set(UNIT_TEST_SOURCES_GPU
         sfc/common.cu
         traversal/groups.cu
         traversal/macs.cu
-	    traversal/traversal.cu
-	    traversal/surface_detection.cu
-	    traversal/large_surface_detection.cu
-	    traversal/collision.cu
-	    traversal/synthetic.cu
-	    traversal/multipole.cu
-	traversal/tune.cu
         tree/btree.cu
         tree/csarray.cu
         tree/octree.cu
+        neighbors/compressneighbors.cu
+        neighbors/reducearray.cu
+        neighbors/ijloop.cu
+        neighbors/ijloop_upsweep.cu
 )
 
-if(CMAKE_HIP_COMPILER)
+if(CSTONE_WITH_HIP)
     set_source_files_properties(${UNIT_TEST_SOURCES_GPU} PROPERTIES LANGUAGE HIP)
 endif()
 
 set(testname component_units_cuda)
 
-if(CMAKE_CUDA_COMPILER OR CMAKE_HIP_COMPILER)
+if(CSTONE_WITH_CUDA OR CSTONE_WITH_HIP)
     add_library(gpu_unit_obj OBJECT ${UNIT_TEST_SOURCES_GPU})
     target_link_libraries(gpu_unit_obj PUBLIC OpenMP::OpenMP_CXX GTest::gtest_main)
     # We have to use GCC (mpicxx) as the linker because it was used for GTest
@@ -49,7 +47,7 @@ if(CMAKE_CUDA_COMPILER OR CMAKE_HIP_COMPILER)
     install(TARGETS ${testname} RUNTIME DESTINATION ${CMAKE_INSTALL_SBINDIR}/unit_cuda)
 endif()
 
-if(CMAKE_HIP_COMPILER)
+if(CSTONE_WITH_HIP)
     set_target_properties(${testname} PROPERTIES LINKER_LANGUAGE CXX)
 endif()
 
