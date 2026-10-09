@@ -101,9 +101,13 @@ if(CMAKE_CUDA_COMPILER OR CMAKE_HIP_COMPILER)
   # this globally via CMAKE_CUDA_FLAGS; we propagate it PUBLIC from cstone_gpu
   # so any consumer-side CUDA TU inherits it (e.g. our unit tests that include
   # IPPL headers with __host__ __device__ Kokkos lambdas).
+  #
+  # --expt-relaxed-constexpr: the mixed-dimension SFC keys (sfc/sfc.hpp) call constexpr host
+  # functions from device code; upstream sets it globally in domain/CMakeLists.txt.
   target_compile_options(cstone_gpu PUBLIC
     $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fopenmp>
-    $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>)
+    $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
+    $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
 
   # AMD/HIP backend (hipcc, no CUDA). cstone and ryoanji use thrust/cub, which
   # under HIP map to rocThrust + hipCUB; thrust must be pointed at the HIP device
