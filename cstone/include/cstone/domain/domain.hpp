@@ -371,6 +371,8 @@ public:
     std::span<const LocalIndex> layout() const { return {rawPtr(layoutAcc_), layoutAcc_.size()}; }
     //! @brief return the coordinate bounding box from the previous sync call
     const Box<T>& box() const { return global_.box(); }
+    //! @brief set the coordinate bounding box for the next sync call (kept there for fixed and periodic boundaries)
+    void setBox(const Box<T>& box) { global_.setBox(box); }
 
     KeyType assignmentStart() const { return global_.assignment()[myRank_]; }
 

@@ -238,6 +238,12 @@ public:
 
     //! @brief the global coordinate bounding box
     const Box<T>& box() const { return box_; }
+    /*! @brief replace the global coordinate bounding box
+     *
+     * Dimensions with fixed or periodic boundaries keep this box in the next call to @a assign(); open dimensions
+     * are refitted to the particles. The box must contain all particles and be identical on all ranks.
+     */
+    void setBox(const Box<T>& box) { box_ = box; }
     //! @brief return the space filling curve rank assignment of the last call to @a assign()
     const SfcAssignment<KeyType>& assignment() const { return assignment_; }
 
