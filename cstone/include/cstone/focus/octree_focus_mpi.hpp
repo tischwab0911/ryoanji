@@ -111,8 +111,24 @@ public:
         KeyType focusStart = assignment[myRank_];
         KeyType focusEnd   = assignment[myRank_ + 1];
 
-        std::span enforcedKeys = globalLeaves.subspan(assignment.treeOffsetsConst()[myRank_],
-                                                      assignment.numNodesPerRankConst()[myRank_] + 1);
+        // Mandatory keys: own global leaves (distributed upsweep) and all rank boundaries. Otherwise a coarse
+        // leaf can straddle a peer boundary, belong to no rank, and fail checkLayout in every LET round.
+        std::span ownLeaves = globalLeaves.subspan(assignment.treeOffsetsConst()[myRank_],
+                                                   assignment.numNodesPerRankConst()[myRank_] + 1);
+        std::size_t numBoundaries = assignment.numRanks() + 1;
+        std::size_t numEnforced   = ownLeaves.size() + numBoundaries;
+        reallocateDestructive(enforcedKeysAcc_, numEnforced, allocGrowthRate_);
+        if constexpr (execution::HaveGpu<Exec>{})
+        {
+            memcpyD2DAsync(exec_, ownLeaves.data(), ownLeaves.size(), rawPtr(enforcedKeysAcc_));
+            memcpyH2DAsync(exec_, assignment.data(), numBoundaries, rawPtr(enforcedKeysAcc_) + ownLeaves.size());
+        }
+        else
+        {
+            std::copy(ownLeaves.begin(), ownLeaves.end(), enforcedKeysAcc_.begin());
+            std::copy_n(assignment.data(), numBoundaries, enforcedKeysAcc_.begin() + ownLeaves.size());
+        }
+        std::span<const KeyType> enforcedKeys{rawPtr(enforcedKeysAcc_), numEnforced};
         bool converged;
         if constexpr (execution::HaveGpu<Exec>{})
         {
@@ -756,6 +772,8 @@ private:
     //! @brief leaves in cstone format for tree_
     std::vector<KeyType> leaves_;
     AccVector<KeyType> leavesAcc_;
+    //! @brief mandatory focus tree keys: own global leaves + all rank boundaries
+    AccVector<KeyType> enforcedKeysAcc_;
 
     //! @brief particle counts of the focused tree leaves, tree_.treeLeaves()
     AccVector<unsigned> leafCountsAcc_;
