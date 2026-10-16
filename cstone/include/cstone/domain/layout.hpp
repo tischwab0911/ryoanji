@@ -32,12 +32,15 @@
 
 #pragma once
 
+#include <cstdio>
+#include <cstdlib>
 #include <iostream>
 #include <vector>
 
 #include "cstone/cuda/cuda_utils.hpp"
 #include "cstone/domain/domaindecomp.hpp"
 #include "cstone/primitives/primitives_acc.hpp"
+#include "cstone/sfc/common.hpp"
 #include "cstone/util/tuple_util.hpp"
 #include "cstone/util/type_list.hpp"
 
@@ -213,6 +216,38 @@ int checkLayout(int myRank,
                 if (!peerFound) { ret = 1; }
             }
             if (layout[i + 1] - layout[i] > maxParticles) { ret = -1; }
+        }
+    }
+
+    // failure diagnostics: print the first needed leaves that no rank owns
+    if (ret == 1)
+    {
+        int printed = 0;
+        for (int range = 0; range < 2 && printed < 2; ++range)
+        {
+            for (TreeNodeIndex i = checkRanges[range][0]; i < checkRanges[range][1] && printed < 2; ++i)
+            {
+                if (layout[i + 1] <= layout[i]) { continue; }
+                bool peerFound = false;
+                for (auto peerRange : focusAssignment)
+                {
+                    if (peerRange.start() <= i && i < peerRange.end()) { peerFound = true; }
+                }
+                if (peerFound) { continue; }
+                std::fprintf(stderr,
+                             "[cstone checkLayout] rank %d: needed focus leaf %d (of %d) keys [%llo, %llo) level %u "
+                             "holds %u particles but lies in no rank's assignment;",
+                             myRank, int(i), int(nNodes(ftree)), (unsigned long long)ftree[i],
+                             (unsigned long long)ftree[i + 1], treeLevel<KeyType>(ftree[i + 1] - ftree[i]),
+                             unsigned(layout[i + 1] - layout[i]));
+                for (std::size_t r = 0; r < focusAssignment.size(); ++r)
+                {
+                    std::fprintf(stderr, " r%zu=[%d,%d)", r, int(focusAssignment[r].start()),
+                                 int(focusAssignment[r].end()));
+                }
+                std::fprintf(stderr, "\n");
+                ++printed;
+            }
         }
     }
     return ret;
