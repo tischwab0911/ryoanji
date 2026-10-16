@@ -182,14 +182,16 @@ __global__ void groupSplitsKernel(LocalIndex first,
         leafIdx[k] = stl::upper_bound(layout, layout + numLeaves, bodyIdx[k]) - layout - 1;
     }
 
+    // Unit box with the MixD aspect ratio of @p box (edge 2^-r for bit reduction r): leaf sizes in units of the
+    // longest box edge. T(1): integer 1 / 2^r is 0, which disabled all splits in non-cubic boxes.
     const auto axesBits = box.getBoxDimBits(maxTreeLevel<KeyType>{});
-    Box<T> unitBox(0, 1 / (1 << (maxTreeLevel<KeyType>{} - axesBits[0])), 0,
-                   1 / (1 << (maxTreeLevel<KeyType>{} - axesBits[1])), 0,
-                   1 / (1 << (maxTreeLevel<KeyType>{} - axesBits[2])));
+    Box<T> unitBox(0, T(1) / T(1u << (maxTreeLevel<KeyType>{} - axesBits[0])), 0,
+                   T(1) / T(1u << (maxTreeLevel<KeyType>{} - axesBits[1])), 0,
+                   T(1) / T(1u << (maxTreeLevel<KeyType>{} - axesBits[2])));
     T nodeVolume = 1;
     for (LocalIndex k = 0; k < nwt; ++k)
     {
-        auto nodeIBox = sfcIBox(sfcKey<KeyType>(leaves[leafIdx[0]]), sfcKey<KeyType>(leaves[leafIdx[0] + 1]), axesBits);
+        auto nodeIBox = sfcIBox(sfcKey<KeyType>(leaves[leafIdx[k]]), sfcKey<KeyType>(leaves[leafIdx[k] + 1]), axesBits);
         auto [nodeCenter, nodeSize] = centerAndSize<KeyType>(nodeIBox, unitBox);
         T vol                       = 8 * nodeSize[0] * nodeSize[1] * nodeSize[2];
         nodeVolume                  = vol > 0 ? min(vol, nodeVolume) : nodeVolume;
@@ -197,12 +199,13 @@ __global__ void groupSplitsKernel(LocalIndex first,
     nodeVolume  = warpMin(nodeVolume);
     Tc distCrit = std::cbrt(nodeVolume) * tolFactor;
 
-    // load target coordinates
+    // load target coordinates in units of the longest box edge, like the leaf sizes
+    const Tc invMaxExtent = Tc(1) / box.maxExtent();
     util::array<Vec4<Tc>, nwt> pos_i;
     for (LocalIndex k = 0; k < nwt; k++)
     {
-        pos_i[k] = {x[bodyIdx[k]] * box.ilx(), y[bodyIdx[k]] * box.ily(), z[bodyIdx[k]] * box.ilz(),
-                    h ? Tc(2) * h[bodyIdx[k]] / box.minExtent() : Tc(1)};
+        pos_i[k] = {x[bodyIdx[k]] * invMaxExtent, y[bodyIdx[k]] * invMaxExtent, z[bodyIdx[k]] * invMaxExtent,
+                    h ? Tc(2) * h[bodyIdx[k]] * invMaxExtent : Tc(1)};
     }
 
     auto splitMask = findSplits(pos_i, distCrit * distCrit);
