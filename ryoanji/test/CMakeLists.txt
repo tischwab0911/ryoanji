@@ -46,6 +46,7 @@ set(testname ryoanji_cpu_unit_tests)
 add_executable(${testname}
         nbody/cartesian_qpole.cpp
         nbody/kernel.cpp
+        nbody/heaviside_qpole.cpp
         nbody/traversal_cpu.cpp
         nbody/ewald_cpu.cpp
         test_main.cpp)

@@ -15,6 +15,8 @@
 
 #pragma once
 
+#include <vector>
+
 #include "cstone/traversal/traversal.hpp"
 #include "cstone/traversal/macs.hpp"
 #include "cstone/focus/source_center.hpp"
@@ -264,6 +266,38 @@ void directSum(const Tc* x, const Tc* y, const Tc* z, const Th* h, const Tm* m, 
         *(ax + t) += G * acc[1];
         *(ay + t) += G * acc[2];
         *(az + t) += G * acc[3];
+    }
+}
+
+/*! @brief Heaviside-kernel direct sum for targets [first, last) against all numBodies sources (open boundaries)
+ *
+ * Host counterpart of directSumHeaviside (nbody/direct.cuh), same arguments and output convention.
+ */
+template<class T>
+void directSumHeavisideCpu(LocalIndex first, LocalIndex last, LocalIndex numBodies, HeavisideFrame<T> frame,
+                           const T* x, const T* y, const T* z, const T* m, const T* h, const T* w, T* ex, T* ey,
+                           T* ez, T* cx, T* cy)
+{
+    std::vector<T> s(numBodies), chi(numBodies);
+    for (LocalIndex j = 0; j < numBodies; ++j)
+    {
+        frame.sourceFactors(w[j], s[j], chi[j]);
+    }
+
+#pragma omp parallel for schedule(static)
+    for (LocalIndex t = first; t < last; ++t)
+    {
+        util::array<T, 5> acc{0, 0, 0, 0, 0};
+        Vec3<T>           target{x[t], y[t], z[t]};
+        for (LocalIndex j = 0; j < numBodies; ++j)
+        {
+            acc = P2PHeaviside(acc, target, Vec3<T>{x[j], y[j], z[j]}, m[j], s[j], chi[j], h[t], h[j]);
+        }
+        ex[t] += acc[0];
+        ey[t] += acc[1];
+        ez[t] += acc[2];
+        cx[t] += acc[3];
+        cy[t] += acc[4];
     }
 }
 

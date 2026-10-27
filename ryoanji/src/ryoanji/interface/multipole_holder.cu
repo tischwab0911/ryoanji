@@ -224,4 +224,11 @@ MHOLDER(CartesianMDQpole)
 DIRECT_SUM(float);
 DIRECT_SUM(double);
 
+#define DIRECT_SUM_HEAVISIDE(T)                                                                                        \
+    template void directSumHeaviside(size_t, size_t, size_t, HeavisideFrame<T>, const T*, const T*, const T*,         \
+                                     const T*, const T*, const T*, T*, T*, T*, T*, T*)
+
+DIRECT_SUM_HEAVISIDE(float);
+DIRECT_SUM_HEAVISIDE(double);
+
 } // namespace ryoanji

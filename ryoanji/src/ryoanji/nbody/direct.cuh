@@ -106,4 +106,78 @@ void directSum(size_t first, size_t last, size_t numBodies, Vec3<T> boxL, int nu
     }
 }
 
+/*! @brief direct sum of the Heaviside (uniform-motion) kernel, one thread per target
+ *
+ * Sources carry their rapidity relative to @p frame in @p w; s and chi are computed once per
+ * source when its tile is loaded. Outputs (ex, ey, ez, cx, cy) are added to, see P2PHeaviside.
+ */
+template<class T>
+__global__ void directHeavisideKernel(unsigned first, unsigned last, unsigned numSource, HeavisideFrame<T> frame,
+                                      const T* __restrict__ x, const T* __restrict__ y, const T* __restrict__ z,
+                                      const T* __restrict__ m, const T* __restrict__ h, const T* __restrict__ w,
+                                      T* ex, T* ey, T* ez, T* cx, T* cy)
+{
+    unsigned targetIdx = first + blockDim.x * blockIdx.x + threadIdx.x;
+
+    Vec3<T> pos_i = {T(0), T(0), T(0)};
+    T       h_i   = 1.0;
+    if (targetIdx < last)
+    {
+        pos_i = Vec3<T>{x[targetIdx], y[targetIdx], z[targetIdx]};
+        h_i   = h[targetIdx];
+    }
+
+    util::array<T, 5> acc{0, 0, 0, 0, 0};
+
+    __shared__ util::array<T, 7> sm_bodytile[DirectConfig::numThreads];
+    unsigned                     numTiles = (numSource - 1) / blockDim.x + 1;
+    for (unsigned tile = 0; tile < numTiles; ++tile)
+    {
+        unsigned sourceIdx = tile * blockDim.x + threadIdx.x;
+        if (sourceIdx < numSource)
+        {
+            T s, chi;
+            frame.sourceFactors(w[sourceIdx], s, chi);
+            sm_bodytile[threadIdx.x] = {x[sourceIdx], y[sourceIdx], z[sourceIdx], m[sourceIdx], h[sourceIdx], s, chi};
+        }
+        else { sm_bodytile[threadIdx.x] = {0, 0, 0, 0, 1.0, 1.0, 0}; }
+
+        __syncthreads();
+
+        for (unsigned j = 0; j < blockDim.x; ++j)
+        {
+            Vec3<T> pos_j{sm_bodytile[j][0], sm_bodytile[j][1], sm_bodytile[j][2]};
+            acc = P2PHeaviside(acc, pos_i, pos_j, sm_bodytile[j][3], sm_bodytile[j][5], sm_bodytile[j][6], h_i,
+                               sm_bodytile[j][4]);
+        }
+
+        __syncthreads();
+    }
+
+    if (targetIdx < last)
+    {
+        ex[targetIdx] += acc[0];
+        ey[targetIdx] += acc[1];
+        ez[targetIdx] += acc[2];
+        cx[targetIdx] += acc[3];
+        cy[targetIdx] += acc[4];
+    }
+}
+
+//! @brief Heaviside-kernel direct sum for targets [first, last) against all numBodies sources (open boundaries)
+template<class T>
+void directSumHeaviside(size_t first, size_t last, size_t numBodies, HeavisideFrame<T> frame, const T* x,
+                        const T* y, const T* z, const T* m, const T* h, const T* w, T* ex, T* ey, T* ez, T* cx,
+                        T* cy)
+{
+    if (last <= first || numBodies == 0) { return; }
+    size_t   numTargets = last - first;
+    unsigned numThreads = DirectConfig::numThreads;
+    unsigned numBlocks  = (numTargets - 1) / numThreads + 1;
+
+    directHeavisideKernel<<<numBlocks, numThreads>>>(first, last, numBodies, frame, x, y, z, m, h, w, ex, ey, ez, cx,
+                                                     cy);
+    kernelSuccess("direct sum Heaviside");
+}
+
 } // namespace ryoanji

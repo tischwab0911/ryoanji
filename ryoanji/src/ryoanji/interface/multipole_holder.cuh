@@ -19,6 +19,7 @@
 
 #include "cstone/focus/octree_focus_mpi.hpp"
 #include "cstone/traversal/groups.hpp"
+#include "ryoanji/nbody/kernel.hpp"
 #include "ryoanji/nbody/types.h"
 
 namespace ryoanji
@@ -91,5 +92,11 @@ private:
 template<class T>
 void directSum(size_t first, size_t last, size_t numBodies, Vec3<T> boxL, int numShells, const T* x, const T* y,
                const T* z, const T* m, const T* h, T* p, T* ax, T* ay, T* az);
+
+//! @brief Heaviside (uniform-motion) direct sum, see nbody/direct.cuh
+template<class T>
+void directSumHeaviside(size_t first, size_t last, size_t numBodies, HeavisideFrame<T> frame, const T* x,
+                        const T* y, const T* z, const T* m, const T* h, const T* w, T* ex, T* ey, T* ez, T* cx,
+                        T* cy);
 
 } // namespace ryoanji

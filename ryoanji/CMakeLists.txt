@@ -26,11 +26,13 @@ add_library(ippl::ryoanji_headers ALIAS ryoanji_headers)
 if(CMAKE_CUDA_COMPILER OR CMAKE_HIP_COMPILER)
   set(_RYOANJI_KERNELS_SOURCES
     src/ryoanji/nbody/traversal_gpu.cu
-    src/ryoanji/nbody/upsweep_gpu.cu)
+    src/ryoanji/nbody/upsweep_gpu.cu
+    src/ryoanji/nbody/heaviside_gpu.cu)
 
   set(_RYOANJI_GLUE_SOURCES
     src/ryoanji/interface/ewald.cu
-    src/ryoanji/interface/multipole_holder.cu)
+    src/ryoanji/interface/multipole_holder.cu
+    src/ryoanji/interface/heaviside_holder.cu)
 
   if(CMAKE_HIP_COMPILER AND NOT CMAKE_CUDA_COMPILER)
     set_source_files_properties(${_RYOANJI_KERNELS_SOURCES} ${_RYOANJI_GLUE_SOURCES}
