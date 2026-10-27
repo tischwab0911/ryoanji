@@ -14,6 +14,9 @@
  * @author Sebastian Keller <sebastian.f.keller@gmail.com>
  */
 
+#include <vector>
+
+#include "cstone/cuda/device_vector.h"
 #include "cstone/cuda/gpu_config.cuh"
 #include "cstone/primitives/math.hpp"
 #include "cstone/primitives/warpscan.cuh"
@@ -349,17 +352,26 @@ static __device__ BhStats::type bhStats[BhStats::numStats];
 
 __device__ float        totalPotentialGlob = 0;
 __device__ unsigned int targetCounterGlob  = 0;
+//! @brief number of target groups whose traversal overflowed the cell queue in the current pass
+__device__ unsigned int failedCountGlob = 0;
 
-__global__ void resetTraversalCounters()
+//! @brief reset the work counters of one traversal pass, and the statistics before the first pass
+__global__ void resetTraversalCounters(bool resetStats)
 {
-    for (int i = 0; i < BhStats::numStats; ++i)
+    if (resetStats)
     {
-        bhStats[i] = 0;
+        for (int i = 0; i < BhStats::numStats; ++i)
+        {
+            bhStats[i] = 0;
+        }
+        totalPotentialGlob = 0;
     }
-
-    totalPotentialGlob = 0;
-    targetCounterGlob  = 0;
+    targetCounterGlob = 0;
+    failedCountGlob   = 0;
 }
+
+//! @brief target groups re-traversed (split) after overflowing the cell queue in the last traverse call
+static uint64_t retriedGroupsLast = 0;
 
 /*! @brief Compute approximate body accelerations with Barnes-Hut
  *
@@ -381,6 +393,9 @@ __global__ void resetTraversalCounters()
  * @param[-]     gmPool         temporary storage for the cell traversal stack, uninitialized
  *                              each active warp needs space for TravConfig::memPerWarp int32,
  *                              so the total size is TravConfig::memPerWarp * numWarpsPerBlock * numBlocks
+ * @param[out]   failedGroups   indices (into @p grp) of the groups whose traversal overflowed the cell queue,
+ *                              counted in failedCountGlob; nothing is written for them
+ * @param[in]    failedCapacity length of @p failedGroups
  */
 template<class Tc, class Th, class Tm, class Ta, class Tf, class MType>
 __global__ __launch_bounds__(TravConfig::numThreads) void traverseKernel(
@@ -390,7 +405,7 @@ __global__ __launch_bounds__(TravConfig::numThreads) void traverseKernel(
     const TreeNodeIndex* __restrict__ childOffsets, const TreeNodeIndex* __restrict__ internalToLeaf,
     const LocalIndex* __restrict__ layout, const Vec4<Tf>* __restrict__ sourceCenter,
     const MType* __restrict__ Multipoles, Tc G, int numShells, Vec3<Tc> boxL, Ta* p, Ta* ax, Ta* ay, Ta* az,
-    int* gmPool)
+    int* gmPool, LocalIndex* failedGroups, unsigned failedCapacity)
 {
     const int laneIdx = threadIdx.x & (GpuConfig::warpSize - 1);
     const int warpIdx = threadIdx.x >> GpuConfig::warpSizeLog2;
@@ -458,6 +473,7 @@ __global__ __launch_bounds__(TravConfig::numThreads) void traverseKernel(
         }
 
         unsigned numM2P = 0, numP2P = 0, maxStack = 0;
+        bool overflow = false;
         for (int iz = -numShells; iz <= numShells; ++iz)
         {
             for (int iy = -numShells; iy <= numShells; ++iy)
@@ -490,12 +506,27 @@ __global__ __launch_bounds__(TravConfig::numThreads) void traverseKernel(
                         }
                     }
 
-                    assert(numM2P_ != 0xFFFFFFFF && numP2P_ != 0xFFFFFFFF);
-                    numM2P += numM2P_;
-                    numP2P += numP2P_;
                     maxStack = max(maxStack, maxStack_);
+                    if (numM2P_ == 0xFFFFFFFF) { overflow = true; }
+                    else
+                    {
+                        numM2P += numM2P_;
+                        numP2P += numP2P_;
+                    }
                 }
             }
+        }
+
+        if (overflow)
+        {
+            // partial result: write nothing, the host splits the group and traverses the halves again
+            if (laneIdx == 0)
+            {
+                unsigned slot = atomicAdd(&failedCountGlob, 1u);
+                if (slot < failedCapacity) { failedGroups[slot] = targetIdx; }
+                atomicMax(&bhStats[BhStats::maxStack], maxStack);
+            }
+            continue;
         }
 
         const int bodyIdxLane = bodyBegin + laneIdx;
@@ -548,15 +579,44 @@ double traverse(cstone::GroupView grp, const int initNodeIdx, const Tc* __restri
                 Vec3<Tc> boxL, Ta* p, Ta* ax, Ta* ay, Ta* az, int* gmPool)
 {
 
+    // A target group whose traversal overflows the per-warp cell queue (a group far larger than the cells around
+    // it) writes nothing; it is split in two along the SFC and the halves are traversed again, down to single
+    // targets. The forces are exact; only a single target that still overflows is reported (maxP2P = 0xFFFFFFFF).
     int numWarpsPerBlock = TravConfig::numThreads / GpuConfig::warpSize;
-    int numBlocks        = cstone::iceil(grp.numGroups, numWarpsPerBlock);
-    numBlocks            = std::min(numBlocks, TravConfig::maxNumActiveBlocks);
+    // gmPool holds the cell queues of the blocks of the first pass (stackSize(grp.numGroups)); later passes may
+    // have more groups but use at most as many blocks, whose warps take the groups in turn
+    const int poolBlocks = std::min<int>(cstone::iceil(grp.numGroups, numWarpsPerBlock), TravConfig::maxNumActiveBlocks);
+    retriedGroupsLast    = 0;
 
-    resetTraversalCounters<<<1, 1>>>();
-    if (numBlocks > 0)
-        traverseKernel<<<numBlocks, TravConfig::numThreads>>>(grp, initNodeIdx, xt, yt, zt, mt, ht, xs, ys, zs, ms, hs,
+    cstone::DeviceVector<LocalIndex> failed(std::max<LocalIndex>(grp.numGroups, 1));
+    cstone::DeviceVector<LocalIndex> retryStart, retryEnd;
+    cstone::GroupView                pass = grp;
+    resetTraversalCounters<<<1, 1>>>(true);
+    for (bool first = true; pass.numGroups > 0; first = false)
+    {
+        const int numBlocks = std::min<int>(cstone::iceil(pass.numGroups, numWarpsPerBlock), poolBlocks);
+
+        if (!first) { resetTraversalCounters<<<1, 1>>>(false); }
+        traverseKernel<<<numBlocks, TravConfig::numThreads>>>(pass, initNodeIdx, xt, yt, zt, mt, ht, xs, ys, zs, ms, hs,
                                                               childOffsets, internalToLeaf, layout, sourceCenter,
-                                                              multipoles, G, numShells, boxL, p, ax, ay, az, gmPool);
+                                                              multipoles, G, numShells, boxL, p, ax, ay, az, gmPool,
+                                                              rawPtr(failed), failed.size());
+        unsigned numFailed;
+        checkGpuErrors(cudaMemcpyFromSymbol(&numFailed, GPU_SYMBOL(failedCountGlob), sizeof(unsigned)));
+        if (numFailed == 0) { break; }
+        retriedGroupsLast += numFailed;
+
+        auto [next, unsplittable] = splitFailedGroups(pass, rawPtr(failed), numFailed, retryStart, retryEnd);
+        if (unsplittable > 0)
+        {
+            BhStats::type flag = 0xFFFFFFFF;  // reported as an exhausted traversal stack
+            checkGpuErrors(cudaMemcpyToSymbol(GPU_SYMBOL(bhStats), &flag, sizeof(flag),
+                                              BhStats::maxP2P * sizeof(BhStats::type)));
+        }
+        pass = next;
+        failed.resize(std::max<LocalIndex>(pass.numGroups, 1));
+    }
+
     float totalPotential;
     checkGpuErrors(cudaMemcpyFromSymbol(&totalPotential, GPU_SYMBOL(totalPotentialGlob), sizeof(float)));
     return 0.5 * Tc(G) * totalPotential;
@@ -581,6 +641,40 @@ TRAVERSE_MPOLE(CartesianQuadrupole)
 TRAVERSE_MPOLE(CartesianMDQpole)
 
 int bhMaxTargetSize() { return TravConfig::targetSize; }
+
+uint64_t readTraversalRetries() { return retriedGroupsLast; }
+
+std::pair<cstone::GroupView, unsigned> splitFailedGroups(const cstone::GroupView& pass, const LocalIndex* failedIds,
+                                                         unsigned numFailed, cstone::DeviceVector<LocalIndex>& retryStart,
+                                                         cstone::DeviceVector<LocalIndex>& retryEnd)
+{
+    // groupEnd may alias groupStart + 1 (cstone::GroupData): copy both ranges as given
+    std::vector<LocalIndex> ids(numFailed), starts(pass.numGroups), ends(pass.numGroups);
+    checkGpuErrors(cudaMemcpy(ids.data(), failedIds, numFailed * sizeof(LocalIndex), cudaMemcpyDeviceToHost));
+    checkGpuErrors(
+        cudaMemcpy(starts.data(), pass.groupStart, pass.numGroups * sizeof(LocalIndex), cudaMemcpyDeviceToHost));
+    checkGpuErrors(cudaMemcpy(ends.data(), pass.groupEnd, pass.numGroups * sizeof(LocalIndex), cudaMemcpyDeviceToHost));
+
+    std::vector<LocalIndex> newStart, newEnd;
+    unsigned                unsplittable = 0;
+    for (LocalIndex id : ids)
+    {
+        const LocalIndex first = starts[id], last = ends[id];
+        if (last - first < 2)
+        {
+            ++unsplittable;
+            continue;
+        }
+        const LocalIndex mid = first + (last - first) / 2;
+        newStart.insert(newStart.end(), {first, mid});
+        newEnd.insert(newEnd.end(), {mid, last});
+    }
+    retryStart = newStart;
+    retryEnd   = newEnd;
+    return {cstone::GroupView{pass.firstBody, pass.lastBody, LocalIndex(newStart.size()), rawPtr(retryStart),
+                              rawPtr(retryEnd)},
+            unsplittable};
+}
 
 LocalIndex stackSize(LocalIndex numGroups)
 {

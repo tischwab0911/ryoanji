@@ -257,7 +257,8 @@ TEST(TargetGroups, groupVolumes)
         float tolFactor = std::sqrt(3.0) / distCrit * 1.01;
         groupSplitsKernel<groupSize, T><<<iceil(gridSize, numThreads), numThreads>>>(
             first, last, rawPtr(x), rawPtr(y), rawPtr(z), rawPtr(h), rawPtr(d_leaves), nNodes(leaves), rawPtr(d_layout),
-            box, tolFactor, rawPtr(splitMasks), rawPtr(groupDiv), numGroups);
+            box, tolFactor, rawPtr(splitMasks), rawPtr(groupDiv), numGroups,
+            /*extentRatio=*/0.0f);  // the consecutive-distance criterion alone
 
         thrust::host_vector<LocalIndex> h_groupDiv = groupDiv;
         thrust::host_vector<LocalIndex> ref        = std::vector<LocalIndex>{2, 2};
@@ -267,7 +268,8 @@ TEST(TargetGroups, groupVolumes)
         float tolFactor = std::sqrt(3.0) / distCrit * 0.99;
         groupSplitsKernel<groupSize, T><<<iceil(gridSize, numThreads), numThreads>>>(
             first, last, rawPtr(x), rawPtr(y), rawPtr(z), rawPtr(h), rawPtr(d_leaves), nNodes(leaves), rawPtr(d_layout),
-            box, tolFactor, rawPtr(splitMasks), rawPtr(groupDiv), numGroups);
+            box, tolFactor, rawPtr(splitMasks), rawPtr(groupDiv), numGroups,
+            /*extentRatio=*/0.0f);  // the consecutive-distance criterion alone
 
         thrust::host_vector<LocalIndex> h_groupDiv = groupDiv;
         thrust::host_vector<LocalIndex> ref        = std::vector<LocalIndex>{64, 60};

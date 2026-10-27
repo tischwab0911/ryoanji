@@ -18,6 +18,8 @@
 #include "cstone/cuda/device_vector.h"
 #include "cstone/primitives/math.hpp"
 #include "cstone/primitives/primitives_gpu.h"
+#include <cstdlib>
+
 #include "cstone/traversal/groups_gpu.cuh"
 
 namespace cstone
@@ -84,10 +86,18 @@ void computeGroupSplitsImpl(
     numSplitsPerGroup.reserve(numFixedGroups * 1.1);
     numSplitsPerGroup.resize(numFixedGroups + 1);
 
+    // Window-extent splits (groupSplitsKernel): windows longer than this many times the allowed
+    // extent are cut. CSTONE_GROUP_EXTENT_SPLIT=<ratio> overrides the default 8; 0 disables them.
+    static const float extentRatio = []
+    {
+        const char* value = std::getenv("CSTONE_GROUP_EXTENT_SPLIT");
+        return value == nullptr ? 8.0f : std::strtof(value, nullptr);
+    }();
+
     if (numFixedGroups > 0)
         groupSplitsKernel<groupSize><<<iceil(gridSize, numThreads), numThreads, 0, exec>>>(
             first, last, x, y, z, h, leaves, numLeaves, layout, box, tolFactor, rawPtr(splitMasks),
-            rawPtr(numSplitsPerGroup), numFixedGroups);
+            rawPtr(numSplitsPerGroup), numFixedGroups, extentRatio);
 
     groups.reserve(numFixedGroups * 1.1);
     groups.resize(numFixedGroups + 1);

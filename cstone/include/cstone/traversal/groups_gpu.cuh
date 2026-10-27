@@ -160,7 +160,8 @@ __global__ void groupSplitsKernel(LocalIndex first,
                                   float tolFactor,
                                   util::array<GpuConfig::ThreadMask, groupSize / GpuConfig::warpSize>* splitMasks,
                                   LocalIndex* numSplitsPerGroup,
-                                  unsigned /*numGroups*/)
+                                  unsigned /*numGroups*/,
+                                  float extentRatio)
 {
     constexpr LocalIndex nwt = groupSize / GpuConfig::warpSize;
 
@@ -189,12 +190,17 @@ __global__ void groupSplitsKernel(LocalIndex first,
                    T(1) / T(1u << (maxTreeLevel<KeyType>{} - axesBits[1])), 0,
                    T(1) / T(1u << (maxTreeLevel<KeyType>{} - axesBits[2])));
     T nodeVolume = 1;
+    Vec3<T> leafEdge{1, 1, 1};  // smallest leaf edge per axis in the window
     for (LocalIndex k = 0; k < nwt; ++k)
     {
         auto nodeIBox = sfcIBox(sfcKey<KeyType>(leaves[leafIdx[k]]), sfcKey<KeyType>(leaves[leafIdx[k] + 1]), axesBits);
         auto [nodeCenter, nodeSize] = centerAndSize<KeyType>(nodeIBox, unitBox);
         T vol                       = 8 * nodeSize[0] * nodeSize[1] * nodeSize[2];
         nodeVolume                  = vol > 0 ? min(vol, nodeVolume) : nodeVolume;
+        for (int j = 0; j < 3; ++j)
+        {
+            leafEdge[j] = min(leafEdge[j], T(2) * nodeSize[j]);
+        }
     }
     nodeVolume  = warpMin(nodeVolume);
     Tc distCrit = std::cbrt(nodeVolume) * tolFactor;
@@ -209,6 +215,47 @@ __global__ void groupSplitsKernel(LocalIndex first,
     }
 
     auto splitMask = findSplits(pos_i, distCrit * distCrit);
+
+    // findSplits only limits the distance between consecutive particles: a chain of them (a thin
+    // column along the SFC, e.g. at the sharp edge of a beam and through an image plane) passes as
+    // one group many times longer than its neighbours, and the traversal from it opens so many
+    // cells that its stack overflows. Cut windows whose extent along an axis exceeds extentRatio
+    // times tolFactor times the smallest leaf edge along that axis into equal chunks within that
+    // limit (per axis: thin MixD leaves, e.g. of a sheet, have a small volume but long edges).
+    // Ordinary windows span a few leaves and stay whole: splitting them leaves warps half empty.
+    Vec3<Tc> lo{pos_i[0][0], pos_i[0][1], pos_i[0][2]}, hi = lo;
+    for (LocalIndex k = 0; k < nwt; ++k)
+    {
+        for (int j = 0; j < 3; ++j)
+        {
+            lo[j] = min(lo[j], pos_i[k][j]);
+            hi[j] = max(hi[j], pos_i[k][j]);
+        }
+    }
+    Tc ratio = 0;  // largest window extent over the allowed extent, per axis
+    for (int j = 0; j < 3; ++j)
+    {
+        const Tc allowed = Tc(tolFactor) * Tc(warpMin(leafEdge[j]));
+        const Tc extent  = warpMax(hi[j]) - warpMin(lo[j]);
+        if (allowed > 0) { ratio = max(ratio, extent / allowed); }
+    }
+    if (extentRatio > 0 && ratio > Tc(extentRatio))
+    {
+        unsigned chunk = groupSize;
+        while (chunk > 1 && Tc(chunk) * ratio > Tc(groupSize) * Tc(extentRatio))
+        {
+            chunk /= 2;
+        }
+        // the last window is padded with copies of particle last - 1: no splits there, or groups
+        // would start beyond last
+        const LocalIndex inWindow = imin(groupSize, last - (first + warpIdx * groupSize));
+        for (LocalIndex k = 0; k < nwt; ++k)
+        {
+            // bit l of segment k: split after window particle k * warpSize + l
+            const LocalIndex next = k * GpuConfig::warpSize + laneIdx + 1;
+            splitMask[k] |= ballotSync(next < inWindow && next % chunk == 0);
+        }
+    }
 
     if (laneIdx == 0)
     {
