@@ -16,6 +16,10 @@
 
 #pragma once
 
+#include <utility>
+
+#include "cstone/cuda/device_vector.h"
+
 #include "cstone/traversal/groups.hpp"
 #include "cstone/util/array.hpp"
 
@@ -59,5 +63,18 @@ LocalIndex stackSize(LocalIndex numGroups);
 
 //! @brief return traversal statistics from last call to "traverse": sumP2P, maxP2P, sumM2P, maxM2P, maxStack
 util::array<uint64_t, 5> readBhStats();
+
+//! @brief target groups that overflowed the cell queue and were split and traversed again in the last "traverse"
+uint64_t readTraversalRetries();
+
+/*! @brief split the target groups @p failedIds (device indices into @p pass) in two along the SFC
+ *
+ * For the next pass of a traversal whose groups overflowed the per-warp cell queue. The new groups are stored in
+ * @p retryStart and @p retryEnd and described by the returned view; .second counts the single targets that
+ * could not be split further.
+ */
+std::pair<cstone::GroupView, unsigned> splitFailedGroups(const cstone::GroupView& pass, const LocalIndex* failedIds,
+                                                         unsigned numFailed, cstone::DeviceVector<LocalIndex>& retryStart,
+                                                         cstone::DeviceVector<LocalIndex>& retryEnd);
 
 } // namespace ryoanji

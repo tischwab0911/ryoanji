@@ -78,6 +78,9 @@ public:
 
     util::array<uint64_t, 5> readStats() const;
 
+    //! @brief target groups split and traversed again after overflowing the traversal stack in the last compute
+    uint64_t retriedGroups() const;
+
     const MType* deviceMultipoles() const;
 
 private:
