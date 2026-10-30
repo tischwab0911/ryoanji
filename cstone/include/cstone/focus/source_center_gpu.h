@@ -17,6 +17,7 @@
 
 #include "cstone/execution.hpp"
 #include "cstone/focus/source_center.hpp"
+#include "cstone/traversal/velocity_mac.hpp"
 #include "cstone/tree/definitions.h"
 
 namespace cstone
@@ -114,6 +115,47 @@ extern void setMacGpu(execution::Gpu exec,
                       Vec4<T>* macSpheres,
                       float invTheta,
                       const Box<T>& box);
+
+/*! @brief rapidity summaries {sum |m| w, sum |m|, max w, -min w} of leaf cells
+ *
+ * @param[in]  w                particle rapidities relative to the tree frame
+ * @param[in]  m                particle masses (charges), weighted with |m|
+ * @param[in]  leafToInternal   maps a leaf node index to an internal layout node index
+ * @param[in]  numLeaves        number of leaf nodes
+ * @param[in]  layout           particle location of each node, length @a numLeaves + 1
+ * @param[out] summaries        output summaries, in internal node layout
+ */
+template<class Tm, class Tf>
+extern void computeLeafVelocitySummaryGpu(execution::Gpu exec,
+                                          const Tm* w,
+                                          const Tm* m,
+                                          const TreeNodeIndex* leafToInternal,
+                                          TreeNodeIndex numLeaves,
+                                          const LocalIndex* layout,
+                                          VelocitySummary<Tf>* summaries);
+
+//! @brief rapidity summaries of internal nodes with an upsweep, see upsweepCentersGpu
+template<class T>
+extern void upsweepVelocitySummaryGpu(execution::Gpu exec,
+                                      int numLevels,
+                                      const TreeNodeIndex* levelRange,
+                                      const TreeNodeIndex* childOffsets,
+                                      VelocitySummary<T>* summaries);
+
+//! @brief scale the squared MAC radii in @p macSpheres with the velocity criterion of each cell
+template<class T>
+extern void scaleMacsVelocityGpu(execution::Gpu exec,
+                                 TreeNodeIndex numNodes,
+                                 const VelocitySummary<T>* summaries,
+                                 const VelocityMac<T>& params,
+                                 Vec4<T>* macSpheres);
+
+//! @brief number of non-empty cells that are always opened and of cells with kappa > 1
+template<class T>
+extern util::array<uint64_t, 2> velocityMacStatsGpu(execution::Gpu exec,
+                                                    TreeNodeIndex numNodes,
+                                                    const VelocitySummary<T>* summaries,
+                                                    const VelocityMac<T>& params);
 
 template<class T>
 extern void moveCenters(execution::Gpu exec, const Vec3<T>* src, TreeNodeIndex numNodes, Vec4<T>* dest);

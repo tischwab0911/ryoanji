@@ -29,6 +29,7 @@
 #include "cstone/focus/source_center_gpu.h"
 #include "cstone/primitives/primitives_gpu.h"
 #include "cstone/traversal/collisions_gpu.h"
+#include "cstone/traversal/velocity_mac.hpp"
 
 namespace cstone
 {
@@ -179,6 +180,7 @@ public:
          */
         box_             = box;
         rebalanceStatus_ = invalid;
+        velSummValid_    = false;
         updateGeoCenters();
         return converged;
     }
@@ -364,6 +366,27 @@ public:
                        OctreeView<const KeyType> gOctree,
                        DevVec1&& scratch1 = std::vector<LocalIndex>{})
     {
+        updateCenters(x, y, z, m, static_cast<const Tm*>(nullptr), gOctree, scratch1);
+    }
+
+    /*! @brief expansion centers and, if @p w is given, rapidity summaries of all cells
+     *
+     * @param[in] w   particle rapidities relative to the tree frame of the velocity MAC (setVelocityMac),
+     *                same order as x,y,z,m; nullptr: no summaries, the geometric MAC is used unchanged
+     *
+     * The summaries take the same path as the centers: local leaves from local particles, remote leaves by
+     * global and peer exchange, internal nodes by upsweeps. Every rank therefore computes the same summary,
+     * and with it the same velocity-scaled MAC radius, for the same cell.
+     */
+    template<class Tm, class DevVec1 = std::vector<LocalIndex>>
+    void updateCenters(const RealType* x,
+                       const RealType* y,
+                       const RealType* z,
+                       const Tm* m,
+                       const Tm* w,
+                       OctreeView<const KeyType> gOctree,
+                       DevVec1&& scratch1)
+    {
         assert(gOctree.leaves != nullptr);
         TreeNodeIndex firstIdx           = assignment_[myRank_].start();
         TreeNodeIndex lastIdx            = assignment_[myRank_].end();
@@ -371,6 +394,7 @@ public:
 
         reallocate(gOctree.numNodes, allocGrowthRate_, globalCentersAcc_);
         reallocate(octree.numNodes, allocGrowthRate_, centersAcc_);
+        if (w) { reallocate(octree.numNodes, allocGrowthRate_, velSummAcc_); }
 
         auto upsweepCenters = [this](auto levelRange, auto childOffsets, auto centers)
         {
@@ -393,6 +417,11 @@ public:
                           d_layout + firstIdx + 1);
             computeLeafSourceCenterGpu(exec_, x, y, z, m, octree.leafToInternal + octree.numInternalNodes,
                                        octree.numLeafNodes, d_layout, rawPtr(centersAcc_));
+            if (w)
+            {
+                computeLeafVelocitySummaryGpu(exec_, w, m, octree.leafToInternal + octree.numInternalNodes,
+                                              octree.numLeafNodes, d_layout, rawPtr(velSummAcc_));
+            }
             reallocate(scratch1, osz1, 1.0);
         }
         else
@@ -407,6 +436,15 @@ public:
                 //! prepare local leaf centers
                 TreeNodeIndex nodeIdx = octree.leafToInternal[octree.numInternalNodes + leafIdx];
                 centersAcc_[nodeIdx]  = massCenter<RealType>(x, y, z, m, layout[leafIdx], layout[leafIdx + 1]);
+                if (w)
+                {
+                    VelocitySummary<RealType> s = emptyVelocitySummary<RealType>();
+                    for (LocalIndex i = layout[leafIdx]; i < layout[leafIdx + 1]; ++i)
+                    {
+                        addVelocitySource(s, RealType(m[i]), RealType(w[i]));
+                    }
+                    velSummAcc_[nodeIdx] = s;
+                }
             }
         }
 
@@ -419,6 +457,62 @@ public:
                      scratch1);
         //! upsweep with all (leaf) data in place
         upsweepCenters(octree.levelRangeSpan(), octree.childOffsets, centersAcc_.data());
+
+        velSummValid_ = w != nullptr;
+        if (!w) { return; }
+
+        auto upsweepVelocity = [this](auto levelRange, auto childOffsets, auto summaries)
+        {
+            if constexpr (execution::HaveGpu<Exec>{})
+            {
+                upsweepVelocitySummaryGpu(exec_, maxTreeLevel<KeyType>{}, levelRange.data(), childOffsets, summaries);
+            }
+            else { upsweep(levelRange, childOffsets, summaries, CombineVelocitySummary<RealType>{}); }
+        };
+        std::span<VelocitySummary<RealType>> summaries{rawPtr(velSummAcc_), size_t(octree.numNodes)};
+        upsweepVelocity(octree.levelRangeSpan(), octree.childOffsets, summaries.data());
+        globalExchange<VelocitySummary<RealType>>(gOctree, summaries, std::span<VelocitySummary<RealType>>{},
+                                                  scratch1, upsweepVelocity);
+        peerExchange(summaries, static_cast<int>(P2pTags::focusPeerVelocity), scratch1);
+        upsweepVelocity(octree.levelRangeSpan(), octree.childOffsets, summaries.data());
+    }
+
+    /*! @brief scale the MAC radii of all later updateMacs/setMacRadius calls with the velocity criterion
+     *
+     * Applies to radii computed after an updateCenters call with rapidities, until the tree changes.
+     */
+    void setVelocityMac(const VelocityMac<RealType>& params) { velMac_ = params; }
+
+    //! @brief true if the MAC radii carry the velocity criterion (setVelocityMac and current summaries)
+    bool velocityMacApplied() const
+    {
+        return velMac_.active && velSummValid_ && TreeNodeIndex(velSummAcc_.size()) >= octreeAcc_.numNodes;
+    }
+
+    /*! @brief number of LET cells that are always opened and of cells with a radius scaled by kappa > 1
+     *
+     * Diagnostic (one reduction and a host synchronisation): always-open cells are refined to leaves and become
+     * halos on every rank that sees them.
+     */
+    util::array<uint64_t, 2> velocityMacStats() const
+    {
+        if (!velocityMacApplied()) { return {0, 0}; }
+        if constexpr (execution::HaveGpu<Exec>{})
+        {
+            return velocityMacStatsGpu(exec_, octreeAcc_.numNodes, rawPtr(velSummAcc_), velMac_);
+        }
+        else
+        {
+            uint64_t open = 0, scaled = 0;
+            for (TreeNodeIndex i = 0; i < octreeAcc_.numNodes; ++i)
+            {
+                if (!(velSummAcc_[i][1] > RealType(0))) { continue; }
+                RealType scale = velocityMacScale2(velSummAcc_[i], velMac_);
+                open += scale < RealType(0);
+                scaled += scale > RealType(1);
+            }
+            return {open, scaled};
+        }
     }
 
     /*! @brief Update the MAC criteria based on a min distance MAC
@@ -458,6 +552,23 @@ public:
             setMacGpu(exec_, rawPtr(octreeAcc_.prefixes), octreeAcc_.numNodes, rawPtr(centersAcc_), invTheta, box_);
         }
         else { setMac<RealType, KeyType>(octreeAcc_.prefixes, centersAcc_, invTheta, box_); }
+
+        // Velocity-aware MAC: the halo discovery (markMacs) and the traversal then use the same radii.
+        if (velocityMacApplied())
+        {
+            if constexpr (execution::HaveGpu<Exec>{})
+            {
+                scaleMacsVelocityGpu(exec_, octreeAcc_.numNodes, rawPtr(velSummAcc_), velMac_, rawPtr(centersAcc_));
+            }
+            else
+            {
+#pragma omp parallel for schedule(static)
+                for (TreeNodeIndex i = 0; i < octreeAcc_.numNodes; ++i)
+                {
+                    centersAcc_[i][3] = scaleVelocityMac(centersAcc_[i][3], velSummAcc_[i], velMac_);
+                }
+            }
+        }
     }
 
     /*! @brief Update the MAC criteria based on given expansion centers and effective inverse theta
@@ -786,6 +897,12 @@ private:
     //! @brief geometric center and size per cell
     AccVector<Vec3<RealType>> geoCentersAcc_;
     AccVector<Vec3<RealType>> geoSizesAcc_;
+
+    //! @brief rapidity summaries per cell of tree_.octree() for the velocity MAC (updateCenters with rapidities)
+    AccVector<VelocitySummary<RealType>> velSummAcc_;
+    //! @brief true if velSummAcc_ belongs to the current tree
+    bool velSummValid_{false};
+    VelocityMac<RealType> velMac_;
 
     //! @brief we also need to hold on to the expansion centers of the global tree for the multipole upsweep
     AccVector<SourceCenterType<RealType>> globalCentersAcc_;

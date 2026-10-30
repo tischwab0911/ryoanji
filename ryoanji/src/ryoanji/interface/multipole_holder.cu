@@ -117,6 +117,8 @@ public:
 
     uint64_t retriedGroups() const { return readTraversalRetries(); }
 
+    uint64_t remoteApproximations() const { return readTraversalRemoteApproximations(); }
+
     const MType* deviceMultipoles() const { return rawPtr(multipoles_); }
 
 private:
@@ -198,6 +200,12 @@ template<class Tc, class Th, class Tm, class Ta, class Tf, class KeyType, class 
 uint64_t MultipoleHolder<Tc, Th, Tm, Ta, Tf, KeyType, MType>::retriedGroups() const
 {
     return impl_->retriedGroups();
+}
+
+template<class Tc, class Th, class Tm, class Ta, class Tf, class KeyType, class MType>
+uint64_t MultipoleHolder<Tc, Th, Tm, Ta, Tf, KeyType, MType>::remoteApproximations() const
+{
+    return impl_->remoteApproximations();
 }
 
 template<class Tc, class Th, class Tm, class Ta, class Tf, class KeyType, class MType>

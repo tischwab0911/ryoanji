@@ -75,7 +75,7 @@ struct Cell
         {
             T s, chi;
             frame.sourceFactors(w[i], s, chi);
-            acc = P2PHeaviside(acc, target, Vec3<T>{x[i], y[i], z[i]}, m[i], s, chi, T(0), T(0));
+            acc = P2PHeaviside<true>(acc, target, Vec3<T>{x[i], y[i], z[i]}, m[i], s, chi, T(0), T(0));
         }
         return acc;
     }
@@ -178,7 +178,8 @@ TEST(HeavisideQpole, RapidityMomentsRemoveTheDistanceIndependentError)
             EXPECT_LT(ea[0], 0.1 * eb[0]);
         }
         // third order: the distance-independent error falls ~8x per halving of the spread (a wrong
-        // second-order term would give 4x); measured 6.6x and 7.5x
+        // second-order term would give 4x); measured 6.6x and 7.5x. The errors (1e-8 ... 1e-10) are below the
+        // single-precision inverseSquareRoot of the traversal, so the multipole is evaluated in full precision.
         Vec3<T> far{cell.center[0] + 16384, cell.center[1], cell.center[2]};
         T       previous = 0;
         for (T spread : {0.1, 0.05, 0.025})
@@ -187,8 +188,10 @@ TEST(HeavisideQpole, RapidityMomentsRemoveTheDistanceIndependentError)
             auto M = c2.raw(0, 400, c2.center);
             heavisideFinalize(M, frame, true);
             util::array<T, 5> a{0, 0, 0, 0, 0};
-            a       = M2PHeaviside(a, far, c2.center, M);
+            a       = M2PHeaviside<true>(a, far, c2.center, M);
             T error = relativeError(a, c2.direct(frame, far))[0];
+            std::printf("[HV] point-like cell far away, spread %.3f: error %.3e (ratio %.2f)\n", spread, error,
+                        previous > 0 ? previous / error : 0.0);
             if (previous > 0) { EXPECT_GT(previous / error, 5.5); }
             previous = error;
         }
@@ -211,4 +214,90 @@ TEST(HeavisideQpole, MacScale)
     auto empty = heavisideZero<T>();
     heavisideFinalize(empty, frame, true);
     EXPECT_EQ(heavisideMacScale2(empty, frame, T(0.25), true), 1.0);
+}
+
+//! @brief cstone's per-cell rapidity summary combines exactly and gives the multipole's MAC scale
+TEST(HeavisideQpole, VelocitySummaryMatchesMultipoleMacScale)
+{
+    for (T gammaRef : {1.05, 2.0, 30.0})
+    {
+        for (T w0 : {-0.6, 0.0, 0.3})
+        {
+            for (T spread : {0.05, 0.4, 1.5})
+            {
+                auto  frame = frameAt(gammaRef, gammaRef > 1.2);
+                Cell  cell(200, w0, spread);
+                for (size_t i = 0; i < cell.m.size(); i += 3)
+                {
+                    cell.m[i] = -0.5; // signed charges (images): |q| weights
+                }
+
+                auto whole = cstone::emptyVelocitySummary<T>();
+                auto lo = whole, hi = whole;
+                for (int i = 0; i < 200; ++i)
+                {
+                    cstone::addVelocitySource(whole, cell.m[i], cell.w[i]);
+                    cstone::addVelocitySource(i < 120 ? lo : hi, cell.m[i], cell.w[i]);
+                }
+                auto combined = cstone::combineVelocitySummary(lo, hi);
+                for (int k = 0; k < 4; ++k)
+                {
+                    EXPECT_NEAR(combined[k], whole[k], 1e-12 * (1 + std::abs(whole[k])));
+                }
+
+                auto M = cell.raw(0, 200, cell.center);
+                heavisideFinalize(M, frame, true);
+                for (bool moments : {true, false})
+                {
+                    auto p = velocityMac(frame, T(0.25), moments);
+                    EXPECT_NEAR(cstone::velocityMacScale2(whole, p), heavisideMacScale2(M, frame, T(0.25), moments),
+                                1e-12);
+                }
+            }
+        }
+    }
+}
+
+//! @brief kappa = max over the cell's rapidity range of max(s, 1/s), s = cosh(wRef + w^) / gammaRef (brute force)
+TEST(HeavisideQpole, VelocityMacKappaIsTheLargestStretch)
+{
+    for (T gammaRef : {1.0, 1.3, 4.0, 100.0})
+    {
+        T    wRef = std::acosh(gammaRef);
+        auto p    = velocityMac(frameAt(gammaRef, false), T(10), true); // no rapidity criterion in this range
+        for (T wMin : {-2.5, -0.9, -0.1, 0.2})
+        {
+            for (T width : {0.0, 0.05, 0.7, 2.0})
+            {
+                T wMax = wMin + width, wc = wMin + 0.4 * width;
+                T kappa = 1;
+                for (int k = 0; k <= 20000; ++k)
+                {
+                    T s   = std::cosh(wRef + wMin + width * k / 20000.0) / gammaRef;
+                    kappa = std::max(kappa, std::max(s, 1 / s));
+                }
+                EXPECT_NEAR(cstone::velocityMacScale2(wMin, wMax, wc, p), kappa * kappa, 1e-6 * kappa * kappa)
+                    << "gammaRef " << gammaRef << " range [" << wMin << ", " << wMax << "]";
+            }
+        }
+    }
+}
+
+//! @brief empty cells keep radius 0, cells beyond thetaV are always opened, others are scaled by kappa^2
+TEST(HeavisideQpole, ScaleVelocityMac)
+{
+    auto p     = velocityMac(frameAt(3.0, true), T(0.25), true);
+    auto empty = cstone::emptyVelocitySummary<T>();
+    EXPECT_EQ(cstone::scaleVelocityMac(T(0), empty, p), T(0));
+    EXPECT_EQ(cstone::scaleVelocityMac(T(2), empty, p), T(2));
+
+    auto narrow = empty, wide = empty;
+    cstone::addVelocitySource(narrow, T(1), T(0.1));
+    cstone::addVelocitySource(narrow, T(1), T(-0.1));
+    cstone::addVelocitySource(wide, T(1), T(0.5));
+    cstone::addVelocitySource(wide, T(-1), T(-0.5));
+    EXPECT_EQ(cstone::scaleVelocityMac(T(0), narrow, p), T(0));
+    EXPECT_NEAR(cstone::scaleVelocityMac(T(2), narrow, p), 2 * cstone::velocityMacScale2(narrow, p), 1e-15);
+    EXPECT_GT(cstone::velocityMacScale2(narrow, p), 1.0);
+    EXPECT_EQ(cstone::scaleVelocityMac(T(2), wide, p), cstone::alwaysOpenMac<T>());
 }

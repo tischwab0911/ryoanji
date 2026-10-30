@@ -223,10 +223,12 @@ template class DeviceVector<util::array<float, 4>>;
 template class DeviceVector<util::array<float, 8>>;
 template class DeviceVector<util::array<float, 12>>;
 template class DeviceVector<util::array<float, 24>>;
+template class DeviceVector<util::array<float, 32>>;
 template class DeviceVector<util::array<double, 3>>;
 template class DeviceVector<util::array<double, 4>>;
 template class DeviceVector<util::array<double, 8>>;
 template class DeviceVector<util::array<double, 12>>;
 template class DeviceVector<util::array<double, 24>>;
+template class DeviceVector<util::array<double, 32>>;
 
 } // namespace cstone

@@ -82,6 +82,9 @@ public:
     //! @brief target groups split and traversed again after overflowing the traversal stack in the last compute
     uint64_t retriedGroups() const;
 
+    //! @brief remote leaves applied as multipoles although they failed the MAC in the last compute (diagnostic)
+    uint64_t remoteApproximations() const;
+
     const MType* deviceMultipoles() const;
 
 private:

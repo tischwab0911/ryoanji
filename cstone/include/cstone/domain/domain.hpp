@@ -234,16 +234,64 @@ public:
                   std::tuple<Vectors1&...> particleProperties,
                   std::tuple<Vectors2&...> scratchBuffers)
     {
-        staticChecks<KeyVec, VectorX, VectorH, VectorM, Vectors1...>(scratchBuffers);
+        syncGravImpl(particleKeys, x, y, z, h, m, std::tuple<>{}, particleProperties, scratchBuffers);
+    }
+
+    /*! @brief syncGrav for sources with per-particle velocities
+     *
+     * @param[inout] w  particle rapidities relative to the tree frame of setVelocityMac, distributed like @p m
+     *
+     * The focus tree carries per-cell rapidity summaries next to the expansion centers, and the MAC radii that
+     * decide the locally essential tree and the halos are scaled with the velocity criterion (velocity_mac.hpp).
+     * A traversal that reads expansionCentersAcc() then uses exactly these radii.
+     */
+    template<class KeyVec, class VectorX, class VectorH, class VectorM, class... Vectors1, class... Vectors2>
+    void syncGrav(KeyVec& particleKeys,
+                  VectorX& x,
+                  VectorX& y,
+                  VectorX& z,
+                  VectorH& h,
+                  VectorM& m,
+                  VectorM& w,
+                  std::tuple<Vectors1&...> particleProperties,
+                  std::tuple<Vectors2&...> scratchBuffers)
+    {
+        syncGravImpl(particleKeys, x, y, z, h, m, std::tie(w), particleProperties, scratchBuffers);
+    }
+
+private:
+    //! @brief syncGrav with an optional rapidity array (@p wOpt empty or one array of the type of @p m)
+    template<class KeyVec, class VectorX, class VectorH, class VectorM, class... VectorsW, class... Vectors1,
+             class... Vectors2>
+    void syncGravImpl(KeyVec& particleKeys,
+                      VectorX& x,
+                      VectorX& y,
+                      VectorX& z,
+                      VectorH& h,
+                      VectorM& m,
+                      std::tuple<VectorsW&...> wOpt,
+                      std::tuple<Vectors1&...> particleProperties,
+                      std::tuple<Vectors2&...> scratchBuffers)
+    {
+        static_assert(sizeof...(VectorsW) <= 1 && (std::is_same_v<VectorsW, VectorM> && ...));
+        staticChecks<KeyVec, VectorX, VectorH, VectorM, VectorsW..., Vectors1...>(scratchBuffers);
         auto& sfcOrder = std::get<sizeof...(Vectors2) - 1>(scratchBuffers);
         SfcSorter sorter(sfcOrder);
 
         auto scratch = util::discardLastElement(scratchBuffers);
 
-        auto [exchangeStart, keyView] =
-            distribute(sorter, particleKeys, x, y, z, std::tuple_cat(std::tie(h, m), particleProperties), scratch);
+        auto [exchangeStart, keyView] = distribute(sorter, particleKeys, x, y, z,
+                                                   std::tuple_cat(std::tie(h, m), wOpt, particleProperties), scratch);
+        // w is ordered like m: the focus tree's rapidity summaries are computed from the assigned particles
         gatherArrays(exec_, {sorter.getMap() + global_.postExchangeStart(bufDesc_), global_.numAssigned()}, 0,
-                     std::tie(x, y, z, h, m), util::reverse(scratch));
+                     std::tuple_cat(std::tie(x, y, z, h, m), wOpt), util::reverse(scratch));
+
+        using Tm = std::decay_t<decltype(*rawPtr(m))>;
+        auto rapidities = [&wOpt]() -> const Tm*
+        {
+            if constexpr (sizeof...(VectorsW) == 1) { return rawPtr(std::get<0>(wOpt)); }
+            else { return nullptr; }
+        };
 
         if (firstCall_)
         {
@@ -257,7 +305,7 @@ public:
                 converged =
                     focusTree_.updateTree(global_.assignment(), global_.treeLeaves(), box(), std::get<0>(scratch));
                 focusTree_.updateCounts(keyView, global_.treeLeaves(), global_.nodeCounts(), std::get<0>(scratch));
-                focusTree_.updateCenters(rawPtr(x), rawPtr(y), rawPtr(z), rawPtr(m), global_.octree(),
+                focusTree_.updateCenters(rawPtr(x), rawPtr(y), rawPtr(z), rawPtr(m), rapidities(), global_.octree(),
                                          std::get<0>(scratch));
                 focusTree_.updateMacs(global_.assignment(), 1.0 / theta_, false);
                 MPI_Allreduce(MPI_IN_PLACE, &converged, 1, MPI_INT, MPI_SUM, comm_);
@@ -271,7 +319,7 @@ public:
             focusTree_.updateMacs(global_.assignment(), centerDriftTol_ / theta_, true);
             focusTree_.updateTree(global_.assignment(), global_.treeLeaves(), box(), std::get<0>(scratch));
             focusTree_.updateCounts(keyView, global_.treeLeaves(), global_.nodeCounts(), std::get<0>(scratch));
-            focusTree_.updateCenters(rawPtr(x), rawPtr(y), rawPtr(z), rawPtr(m), global_.octree(),
+            focusTree_.updateCenters(rawPtr(x), rawPtr(y), rawPtr(z), rawPtr(m), rapidities(), global_.octree(),
                                      std::get<0>(scratch));
             focusTree_.updateMacs(global_.assignment(), 1.0 / theta_, false);
 
@@ -292,10 +340,13 @@ public:
 
         // diagnostics(keyView.size());
 
-        updateLayout(sorter, keyView, particleKeys, std::tie(x, y, z, h, m), particleProperties, scratch);
+        updateLayout(sorter, keyView, particleKeys, std::tuple_cat(std::tie(x, y, z, h, m), wOpt), particleProperties,
+                     scratch);
         setupHalos(particleKeys, x, y, z, h, scratch);
         firstCall_ = false;
     }
+
+public:
 
     /*! @brief reapply exchange synchronization pattern from previous call to sync(Grav)() to additional particle fields
      *
@@ -378,6 +429,10 @@ public:
 
     void setTreeConv(bool flag) { convergeTrees = flag; }
     void setHaloFactor(float factor) { haloSearchExt_ = factor; }
+    //! @brief velocity-aware MAC for the next syncGrav calls with rapidities
+    void setVelocityMac(const VelocityMac<T>& params) { focusTree_.setVelocityMac(params); }
+    //! @brief always-open cells and cells with a kappa-scaled radius in the current focus tree
+    util::array<uint64_t, 2> velocityMacStats() const { return focusTree_.velocityMacStats(); }
     void setGrowthAllocRate(float factor) { allocGrowthRate_ = factor; }
 
     //! @brief update expansion (c.o.m) centers of the focus tree

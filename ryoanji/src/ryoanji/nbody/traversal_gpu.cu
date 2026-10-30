@@ -14,6 +14,7 @@
  * @author Sebastian Keller <sebastian.f.keller@gmail.com>
  */
 
+#include <limits>
 #include <vector>
 
 #include "cstone/cuda/device_vector.h"
@@ -167,6 +168,13 @@ __device__ void directAcc(Vec4<Tc> sourceBody, Th hSource, Vec4<Ta> acc_i[TravCo
  * Constant input pointers are additionally marked __restrict__ to indicate to the compiler that loads
  * can be routed through the read-only/texture cache.
  */
+/*! @brief remote leaves applied as multipoles although they fail the MAC for the target group (diagnostic)
+ *
+ * cstone makes every cell failing the MAC for one of the rank's focus leaves a halo, so this only happens for
+ * target groups that span several focus leaves. Counted outside a relative rounding band below the radius.
+ */
+__device__ unsigned long long remoteApproxGlob = 0;
+
 template<class Tc, class Th, class Tm, class Ta, class Tf, class MType>
 __device__ util::tuple<unsigned, unsigned, unsigned>
            traverseWarp(Vec4<Ta>* acc_i, const Vec4<Tc> pos_i[TravConfig::nwt], const Vec3<Tf> targetCenter,
@@ -235,6 +243,11 @@ __device__ util::tuple<unsigned, unsigned, unsigned>
         // mass exactly zero but a non-zero dipole. An empty leaf has a zero MAC radius.
         const bool isRemote    = layout[leafIdx + 1] == layout[leafIdx] && MAC[3] != Tf(0);
         const bool isApprox    = (!isClose || (!isNode && isRemote)) && isSource; // Source cell can be used for M2P
+        const unsigned numRemoteFail = cstone::reduceBool(
+            isClose && !isNode && isRemote && isSource &&
+            applyMAC(curSrcCenter, MAC[3] * (Tf(1) - Tf(64) * std::numeric_limits<Tf>::epsilon()), targetCenter,
+                     targetSize));
+        if (laneIdx == 0 && numRemoteFail) { atomicAdd(&remoteApproxGlob, (unsigned long long)numRemoteFail); }
         int        numKeepWarp = streamCompact(&sourceQueue, isApprox, tempQueue);
         // push valid approx source cell indices into approxQueue
         const int apxTopUp = shflUpSync(sourceQueue, apxFillLevel);
@@ -365,6 +378,7 @@ __global__ void resetTraversalCounters(bool resetStats)
             bhStats[i] = 0;
         }
         totalPotentialGlob = 0;
+        remoteApproxGlob   = 0;
     }
     targetCounterGlob = 0;
     failedCountGlob   = 0;
@@ -643,6 +657,13 @@ TRAVERSE_MPOLE(CartesianMDQpole)
 int bhMaxTargetSize() { return TravConfig::targetSize; }
 
 uint64_t readTraversalRetries() { return retriedGroupsLast; }
+
+uint64_t readTraversalRemoteApproximations()
+{
+    unsigned long long n;
+    checkGpuErrors(cudaMemcpyFromSymbol(&n, GPU_SYMBOL(remoteApproxGlob), sizeof(n)));
+    return n;
+}
 
 std::pair<cstone::GroupView, unsigned> splitFailedGroups(const cstone::GroupView& pass, const LocalIndex* failedIds,
                                                          unsigned numFailed, cstone::DeviceVector<LocalIndex>& retryStart,

@@ -13,6 +13,7 @@
  * @author Sebastian Keller <sebastian.f.keller@gmail.com>
  */
 
+#include "cstone/cuda/errorcheck.cuh"
 #include "cstone/primitives/math.hpp"
 #include "cstone/primitives/warpscan.cuh"
 #include "source_center.hpp"
@@ -317,6 +318,172 @@ SET_MAC_GPU(uint32_t, float);
 SET_MAC_GPU(uint64_t, float);
 SET_MAC_GPU(uint32_t, double);
 SET_MAC_GPU(uint64_t, double);
+
+template<int TPL, class Tm, class Tf>
+__global__ void computeLeafVelocitySummaryKernel(const Tm* w,
+                                                 const Tm* m,
+                                                 const TreeNodeIndex* leafToInternal,
+                                                 TreeNodeIndex numLeaves,
+                                                 const LocalIndex* layout,
+                                                 VelocitySummary<Tf>* summaries)
+{
+    TreeNodeIndex tid     = blockIdx.x * blockDim.x + threadIdx.x;
+    TreeNodeIndex leafIdx = tid / TPL;
+
+    VelocitySummary<Tf> s = emptyVelocitySummary<Tf>();
+    if (leafIdx < numLeaves)
+    {
+        auto first = layout[leafIdx];
+        auto last  = layout[leafIdx + 1];
+
+        for (LocalIndex i = first + threadIdx.x % TPL; i < last; i += TPL)
+        {
+            addVelocitySource(s, Tf(m[i]), Tf(w[i]));
+        }
+    }
+
+#pragma unroll
+    for (int offset = 1; offset < TPL; offset *= 2)
+    {
+        VelocitySummary<Tf> o{shflDownSync(s[0], offset), shflDownSync(s[1], offset), shflDownSync(s[2], offset),
+                              shflDownSync(s[3], offset)};
+        s = combineVelocitySummary(s, o);
+    }
+
+    if (tid % TPL == 0 && leafIdx < numLeaves) { summaries[leafToInternal[leafIdx]] = s; }
+}
+
+template<class Tm, class Tf>
+void computeLeafVelocitySummaryGpu(execution::Gpu exec,
+                                   const Tm* w,
+                                   const Tm* m,
+                                   const TreeNodeIndex* leafToInternal,
+                                   TreeNodeIndex numLeaves,
+                                   const LocalIndex* layout,
+                                   VelocitySummary<Tf>* summaries)
+{
+    constexpr int threadsPerLeaf = 8;
+    unsigned numThreads          = 256;
+    unsigned numBlocks           = iceil(threadsPerLeaf * numLeaves, numThreads);
+
+    if (numBlocks == 0) { return; }
+    computeLeafVelocitySummaryKernel<threadsPerLeaf>
+        <<<numBlocks, numThreads, 0, exec>>>(w, m, leafToInternal, numLeaves, layout, summaries);
+}
+
+#define COMPUTE_LEAF_VELOCITY_SUMMARY_GPU(Tm, Tf)                                                                      \
+    template void computeLeafVelocitySummaryGpu(execution::Gpu, const Tm*, const Tm*, const TreeNodeIndex*,           \
+                                                TreeNodeIndex, const LocalIndex*, VelocitySummary<Tf>*);
+
+COMPUTE_LEAF_VELOCITY_SUMMARY_GPU(double, double);
+COMPUTE_LEAF_VELOCITY_SUMMARY_GPU(float, double);
+COMPUTE_LEAF_VELOCITY_SUMMARY_GPU(float, float);
+
+template<class T>
+__global__ void upsweepVelocitySummaryKernel(TreeNodeIndex firstCell,
+                                             TreeNodeIndex lastCell,
+                                             const TreeNodeIndex* childOffsets,
+                                             VelocitySummary<T>* summaries)
+{
+    const int cellIdx = blockIdx.x * blockDim.x + threadIdx.x + firstCell;
+    if (cellIdx >= lastCell) return;
+
+    TreeNodeIndex firstChild = childOffsets[cellIdx];
+
+    if (firstChild) { summaries[cellIdx] = CombineVelocitySummary<T>{}(cellIdx, firstChild, summaries); }
+}
+
+template<class T>
+void upsweepVelocitySummaryGpu(execution::Gpu exec,
+                               int numLevels,
+                               const TreeNodeIndex* levelRange,
+                               const TreeNodeIndex* childOffsets,
+                               VelocitySummary<T>* summaries)
+{
+    constexpr int numThreads = 256;
+
+    for (int level = numLevels - 1; level >= 0; level--)
+    {
+        int numCellsLevel = levelRange[level + 1] - levelRange[level];
+        int numBlocks     = (numCellsLevel - 1) / numThreads + 1;
+        if (numCellsLevel)
+        {
+            upsweepVelocitySummaryKernel<<<numBlocks, numThreads, 0, exec>>>(levelRange[level], levelRange[level + 1],
+                                                                             childOffsets, summaries);
+        }
+    }
+}
+
+template void
+upsweepVelocitySummaryGpu(execution::Gpu, int, const TreeNodeIndex*, const TreeNodeIndex*, VelocitySummary<float>*);
+template void
+upsweepVelocitySummaryGpu(execution::Gpu, int, const TreeNodeIndex*, const TreeNodeIndex*, VelocitySummary<double>*);
+
+template<class T>
+__global__ void scaleMacsVelocityKernel(TreeNodeIndex numNodes,
+                                        const VelocitySummary<T>* summaries,
+                                        __grid_constant__ const VelocityMac<T> params,
+                                        Vec4<T>* macSpheres)
+{
+    TreeNodeIndex i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= numNodes) { return; }
+    macSpheres[i][3] = scaleVelocityMac(macSpheres[i][3], summaries[i], params);
+}
+
+template<class T>
+void scaleMacsVelocityGpu(execution::Gpu exec,
+                          TreeNodeIndex numNodes,
+                          const VelocitySummary<T>* summaries,
+                          const VelocityMac<T>& params,
+                          Vec4<T>* macSpheres)
+{
+    unsigned numThreads = 256;
+    unsigned numBlocks  = iceil(numNodes, numThreads);
+    if (numBlocks == 0) { return; }
+    scaleMacsVelocityKernel<<<numBlocks, numThreads, 0, exec>>>(numNodes, summaries, params, macSpheres);
+}
+
+template void scaleMacsVelocityGpu(execution::Gpu, TreeNodeIndex, const VelocitySummary<float>*,
+                                   const VelocityMac<float>&, Vec4<float>*);
+template void scaleMacsVelocityGpu(execution::Gpu, TreeNodeIndex, const VelocitySummary<double>*,
+                                   const VelocityMac<double>&, Vec4<double>*);
+
+template<class T>
+__global__ void velocityMacStatsKernel(TreeNodeIndex numNodes,
+                                       const VelocitySummary<T>* summaries,
+                                       __grid_constant__ const VelocityMac<T> params,
+                                       unsigned long long* counts)
+{
+    TreeNodeIndex i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= numNodes || !(summaries[i][1] > T(0))) { return; }
+    T scale = velocityMacScale2(summaries[i], params);
+    if (scale < T(0)) { atomicAdd(counts, 1ull); }
+    if (scale > T(1)) { atomicAdd(counts + 1, 1ull); }
+}
+
+template<class T>
+util::array<uint64_t, 2> velocityMacStatsGpu(execution::Gpu exec,
+                                             TreeNodeIndex numNodes,
+                                             const VelocitySummary<T>* summaries,
+                                             const VelocityMac<T>& params)
+{
+    unsigned long long* d_counts;
+    unsigned long long  counts[2] = {0, 0};
+    checkGpuErrors(cudaMallocAsync(&d_counts, sizeof(counts), exec));
+    checkGpuErrors(cudaMemcpyAsync(d_counts, counts, sizeof(counts), cudaMemcpyHostToDevice, exec));
+    unsigned numThreads = 256;
+    unsigned numBlocks  = iceil(numNodes, numThreads);
+    if (numBlocks > 0) { velocityMacStatsKernel<<<numBlocks, numThreads, 0, exec>>>(numNodes, summaries, params, d_counts); }
+    checkGpuErrors(cudaMemcpyAsync(counts, d_counts, sizeof(counts), cudaMemcpyDeviceToHost, exec));
+    checkGpuErrors(cudaFreeAsync(d_counts, exec));
+    checkGpuErrors(cudaStreamSynchronize(exec));
+    return {counts[0], counts[1]};
+}
+
+template util::array<uint64_t, 2> velocityMacStatsGpu(execution::Gpu, TreeNodeIndex, const VelocitySummary<float>*,
+                                                      const VelocityMac<float>&);
+template util::array<uint64_t, 2> velocityMacStatsGpu(execution::Gpu, TreeNodeIndex, const VelocitySummary<double>*,
+                                                      const VelocityMac<double>&);
 
 template<class T>
 __global__ void moveCentersKernel(const Vec3<T>* src, TreeNodeIndex numNodes, Vec4<T>* dest)

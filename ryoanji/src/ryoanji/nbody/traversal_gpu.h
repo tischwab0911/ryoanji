@@ -67,6 +67,9 @@ util::array<uint64_t, 5> readBhStats();
 //! @brief target groups that overflowed the cell queue and were split and traversed again in the last "traverse"
 uint64_t readTraversalRetries();
 
+//! @brief remote leaves applied as multipoles although they failed the MAC in the last traverse (diagnostic)
+uint64_t readTraversalRemoteApproximations();
+
 /*! @brief split the target groups @p failedIds (device indices into @p pass) in two along the SFC
  *
  * For the next pass of a traversal whose groups overflowed the per-warp cell queue. The new groups are stored in

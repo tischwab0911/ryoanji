@@ -36,6 +36,7 @@
 
 #include <cmath>
 
+#include "cstone/traversal/velocity_mac.hpp"
 #include "kernel.hpp"
 #include "types.h"
 
@@ -79,6 +80,20 @@ struct Hqi
 
 //! @brief rapidity-range sentinel of an empty cell (combined with max)
 constexpr float kNoRapidity = -1.0e30f;
+
+//! @brief parameters of the velocity-aware MAC in cstone for a tree frame
+template<class Tf>
+HOST_DEVICE_FUN cstone::VelocityMac<Tf> velocityMac(const HeavisideFrame<Tf>& frame, Tf thetaV, bool velocityMoments)
+{
+    cstone::VelocityMac<Tf> p;
+    p.gammaRef          = frame.gammaRef;
+    p.betaRef           = frame.betaRef;
+    p.wRef              = frame.wRef;
+    p.thetaV            = thetaV;
+    p.rapidityCriterion = velocityMoments;
+    p.active            = true;
+    return p;
+}
 
 //! @brief raw multipole of an empty cell
 template<class T>
@@ -171,6 +186,50 @@ HOST_DEVICE_FUN void heavisideM2M(HeavisideQpole<T>& M, Vec3<Tc> dX, const Heavi
     M[Hqi::wNegMin] = child[Hqi::wNegMin] > M[Hqi::wNegMin] ? child[Hqi::wNegMin] : M[Hqi::wNegMin];
 }
 
+//! @brief stretch, velocity and second-channel weight (with its first two rapidity derivatives) at w^
+template<class Tf>
+struct OwnFrameKinematics
+{
+    Tf s, beta, omb2, chi, dchi, ddchi;
+};
+
+//! @brief kinematic factors of sources at rapidity @p wHat relative to the frame
+template<class Tf>
+HOST_DEVICE_FUN OwnFrameKinematics<Tf> ownFrameKinematics(const HeavisideFrame<Tf>& frame, Tf wHat)
+{
+    OwnFrameKinematics<Tf> k;
+    const Tf ch = std::cosh(wHat);
+    k.s         = ch + frame.betaRef * std::sinh(wHat);
+    k.beta      = std::tanh(frame.wRef + wHat);
+    k.omb2      = Tf(1) / (frame.gammaRef * frame.gammaRef * k.s * k.s); // 1 - beta^2 = 1 / gamma^2
+    if (frame.netForceChannel) // chi = 1 - betaRef beta
+    {
+        k.chi   = ch / (frame.gammaRef * frame.gammaRef * k.s);
+        k.dchi  = -frame.betaRef * k.omb2;
+        k.ddchi = 2 * frame.betaRef * k.beta * k.omb2;
+    }
+    else // chi = beta
+    {
+        k.chi   = k.beta;
+        k.dchi  = k.omb2;
+        k.ddchi = -2 * k.beta * k.omb2;
+    }
+    return k;
+}
+
+/*! @brief own-frame (z scaled by @p s) traceless second moments 3 S' - tr(S') of tree-frame moments
+ *
+ * @p S and @p Q: xx, xy, xz, yy, yz, zz
+ */
+template<class Tf>
+HOST_DEVICE_FUN util::array<Tf, 6> ownFrameQuadrupole(Tf s, const util::array<Tf, 6>& S)
+{
+    const Tf sxx = S[0], sxy = S[1], sxz = s * S[2];
+    const Tf syy = S[3], syz = s * S[4], szz = s * s * S[5];
+    const Tf tr  = sxx + syy + szz;
+    return {3 * sxx - tr, 3 * sxy, 3 * sxz, 3 * syy - tr, 3 * syz, 3 * szz - tr};
+}
+
 /*! @brief raw -> evaluation form of a cell multipole
  *
  * Without @p velocityMoments (test only) every source is put at the cell's mean rapidity: the
@@ -187,23 +246,8 @@ HOST_DEVICE_FUN void heavisideFinalize(HeavisideQpole<T>& M, const HeavisideFram
         return;
     }
     const Tf wc   = Tf(M[Hqi::absW]) / absMass;
-    const Tf ch   = std::cosh(wc);
-    const Tf s    = ch + frame.betaRef * std::sinh(wc);
-    const Tf beta = std::tanh(frame.wRef + wc);
-    const Tf omb2 = Tf(1) / (frame.gammaRef * frame.gammaRef * s * s); // 1 - beta^2 = 1 / gamma^2
-    Tf       chi, dchi, ddchi;
-    if (frame.netForceChannel) // chi = 1 - betaRef beta
-    {
-        chi   = ch / (frame.gammaRef * frame.gammaRef * s);
-        dchi  = -frame.betaRef * omb2;
-        ddchi = 2 * frame.betaRef * beta * omb2;
-    }
-    else // chi = beta
-    {
-        chi   = beta;
-        dchi  = omb2;
-        ddchi = -2 * beta * omb2;
-    }
+    const auto k  = ownFrameKinematics(frame, wc);
+    const Tf s    = k.s;
 
     const Tf m = M[Hqi::mass];
     const Tf px = M[Hqi::px], py = M[Hqi::py], pz = M[Hqi::pz];
@@ -213,39 +257,36 @@ HOST_DEVICE_FUN void heavisideFinalize(HeavisideQpole<T>& M, const HeavisideFram
     const Tf Xx = Tf(M[Hqi::xx]) - wc * px, Xy = Tf(M[Hqi::xy]) - wc * py, Xz = Tf(M[Hqi::xz]) - wc * pz;
     const Tf V2 = Tf(M[Hqi::v2]) - 2 * wc * v1 + wc * wc * m;
     // own-frame (z scaled by s) second moments, traceless form 3 S' - tr S'
-    const Tf sxx = M[Hqi::sxx], sxy = M[Hqi::sxy], sxz = s * Tf(M[Hqi::sxz]);
-    const Tf syy = M[Hqi::syy], syz = s * Tf(M[Hqi::syz]), szz = s * s * Tf(M[Hqi::szz]);
-    const Tf tr  = sxx + syy + szz;
+    const auto Q = ownFrameQuadrupole(s, util::array<Tf, 6>{Tf(M[Hqi::sxx]), Tf(M[Hqi::sxy]), Tf(M[Hqi::sxz]),
+                                                            Tf(M[Hqi::syy]), Tf(M[Hqi::syz]), Tf(M[Hqi::szz])});
 
     M[Hqi::absMass] = wc;
     M[Hqi::pz]      = s * pz;
-    M[Hqi::sxx]     = 3 * sxx - tr;
-    M[Hqi::sxy]     = 3 * sxy;
-    M[Hqi::sxz]     = 3 * sxz;
-    M[Hqi::syy]     = 3 * syy - tr;
-    M[Hqi::syz]     = 3 * syz;
-    M[Hqi::szz]     = 3 * szz - tr;
-    M[Hqi::absW]    = omb2;
+    M[Hqi::sxx]     = Q[0];
+    M[Hqi::sxy]     = Q[1];
+    M[Hqi::sxz]     = Q[2];
+    M[Hqi::syy]     = Q[3];
+    M[Hqi::syz]     = Q[4];
+    M[Hqi::szz]     = Q[5];
+    M[Hqi::absW]    = k.omb2;
     M[Hqi::v1]      = velocityMoments ? V1 : Tf(0);
     M[Hqi::xx]      = velocityMoments ? Xx : Tf(0);
     M[Hqi::xy]      = velocityMoments ? Xy : Tf(0);
     M[Hqi::xz]      = velocityMoments ? Xz : Tf(0);
     M[Hqi::v2]      = velocityMoments ? V2 : Tf(0);
     M[Hqi::s]       = s;
-    M[Hqi::beta]    = beta;
-    M[Hqi::chi]     = chi;
-    M[Hqi::dchi]    = dchi;
-    M[Hqi::ddchi]   = ddchi;
+    M[Hqi::beta]    = k.beta;
+    M[Hqi::chi]     = k.chi;
+    M[Hqi::dchi]    = k.dchi;
+    M[Hqi::ddchi]   = k.ddchi;
 }
 
 /*! @brief factor for the squared MAC radius of a cell in evaluation form, or a negative value if the
  *         cell must always be opened
  *
- * The spatial expansion converges in the metric of each source's own rest frame. Scaling z by
- * s = gamma / gammaRef changes lengths by at most max(s, 1/s), so a tree-frame radius times
- * kappa = max(s_max, 1/s_min) over the cell's rapidity range is conservative. The rapidity
- * expansion converges for |dw| < pi/2 (kernel and weights are analytic in |Im w| < pi/2 at any
- * energy); cells with max |dw| / (pi/2) > thetaV are opened.
+ * The criterion itself is cstone::velocityMacScale2 (kappa^2 from the rapidity range, "always open"
+ * beyond thetaV), which cstone applies to the MAC radii it uses for the locally essential tree and which
+ * the traversal reads. This overload evaluates it from a multipole for tests.
  */
 template<class T, class Tf>
 HOST_DEVICE_FUN Tf heavisideMacScale2(const HeavisideQpole<T>& M, const HeavisideFrame<Tf>& frame, Tf thetaV,
@@ -253,24 +294,61 @@ HOST_DEVICE_FUN Tf heavisideMacScale2(const HeavisideQpole<T>& M, const Heavisid
 {
     if (M[Hqi::wMax] <= T(kNoRapidity)) { return Tf(1); }
     const Tf wmax = M[Hqi::wMax], wmin = -Tf(M[Hqi::wNegMin]), wc = M[Hqi::absMass];
-    const Tf halfRange = (wmax - wc > wc - wmin) ? wmax - wc : wc - wmin;
-    if (velocityMoments && halfRange > thetaV * Tf(1.5707963267948966)) { return Tf(-1); }
+    return cstone::velocityMacScale2(wmin, wmax, wc, velocityMac(frame, thetaV, velocityMoments));
+}
 
-    auto stretch = [&frame](Tf wHat) { return std::cosh(wHat) + frame.betaRef * std::sinh(wHat); };
-    const Tf sa = stretch(wmin), sb = stretch(wmax);
-    const Tf sMax = sa > sb ? sa : sb;
-    // s is smallest where the absolute rapidity w = wRef + w^ is closest to 0
-    const bool atRest = frame.wRef + wmin <= Tf(0) && frame.wRef + wmax >= Tf(0);
-    const Tf   sMin   = atRest ? Tf(1) / frame.gammaRef : (sa < sb ? sa : sb);
-    const Tf   kappa  = (sMax > Tf(1) / sMin) ? sMax : Tf(1) / sMin;
-    return kappa > Tf(1) ? kappa * kappa : Tf(1);
+//! @brief Laplace field of an own-frame multipole and the powers of the own-frame distance it used
+template<class Ta>
+struct OwnFrameField
+{
+    Ta ax, ay, az; //!< Laplace field in own-frame coordinates, acceleration convention (as M2P)
+    Ta zp, r2, rinv2, rinv3, rinv5;
+};
+
+/*! @brief Laplace monopole, dipole and quadrupole of a multipole in the own frame of its sources
+ *
+ * @param rx, ry, rz  target - expansion centre in tree coordinates
+ * @param s           stretch of the sources relative to the tree frame (own-frame z' = s z)
+ * @param mass        monopole
+ * @param P           own-frame dipole (px, py, s pz)
+ * @param Q           own-frame traceless quadrupole 3 S' - tr(S'): xx, xy, xz, yy, yz, zz
+ *
+ * Ryoanji's dipole-quadrupole M2P (CartesianMDQpole) evaluated at R' = (rx, ry, s rz). The tree-frame
+ * field E~ of the sources is (s ax, s ay, az). @p Exact: full-precision 1 / sqrt (see inverseSquareRootExact),
+ * for tests of the truncation error below the single-precision inverseSquareRoot.
+ */
+template<bool Exact = false, class Ta, class Tm>
+HOST_DEVICE_FUN DEVICE_INLINE OwnFrameField<Ta> ownFrameMDQ(Ta rx, Ta ry, Ta rz, Ta s, Tm mass, const Tm* P,
+                                                            const Tm* Q)
+{
+    OwnFrameField<Ta> f;
+    f.zp     = s * rz; // own-frame z
+    const Ta zp = f.zp;
+
+    f.r2     = rx * rx + ry * ry + zp * zp;
+    const Ta rinv = inverseSquareRootOf<Exact>(f.r2);
+    f.rinv2  = rinv * rinv;
+    f.rinv3  = rinv * f.rinv2;
+    f.rinv5  = f.rinv3 * f.rinv2;
+
+    const Ta Qrx = rx * Q[0] + ry * Q[1] + zp * Q[2];
+    const Ta Qry = rx * Q[1] + ry * Q[3] + zp * Q[4];
+    const Ta Qrz = rx * Q[2] + ry * Q[4] + zp * Q[5];
+    const Ta rQr = rx * Qrx + ry * Qry + zp * Qrz;
+    const Ta rQrAndMonopole = (Ta(-2.5) * rQr * f.rinv5 - Ta(mass) * rinv) * f.rinv2;
+    const Ta PR  = rx * P[0] + ry * P[1] + zp * P[2];
+    f.ax = f.rinv5 * Qrx + rQrAndMonopole * rx + f.rinv5 * (P[0] * f.r2 - Ta(3) * PR * rx);
+    f.ay = f.rinv5 * Qry + rQrAndMonopole * ry + f.rinv5 * (P[1] * f.r2 - Ta(3) * PR * ry);
+    f.az = f.rinv5 * Qrz + rQrAndMonopole * zp + f.rinv5 * (P[2] * f.r2 - Ta(3) * PR * zp);
+    return f;
 }
 
 /*! @brief apply a cell multipole in evaluation form to a target, see P2PHeaviside for the outputs
  *
  * @return @p acc + contribution, (E_x, E_y, E_z, C_x, C_y) in the sign convention of P2P (-field)
+ * @tparam Exact  full-precision 1 / sqrt, as ownFrameMDQ
  */
-template<class Ta, class Tc, class Tmp>
+template<bool Exact = false, class Ta, class Tc, class Tmp>
 HOST_DEVICE_FUN DEVICE_INLINE util::array<Ta, 5> M2PHeaviside(util::array<Ta, 5> acc, const Vec3<Tc>& target,
                                                               const Vec3<Tc>& center,
                                                               const HeavisideQpole<Tmp>& M)
@@ -279,27 +357,13 @@ HOST_DEVICE_FUN DEVICE_INLINE util::array<Ta, 5> M2PHeaviside(util::array<Ta, 5>
     const Ta rx = target[0] - center[0];
     const Ta ry = target[1] - center[1];
     const Ta rz = target[2] - center[2];
-    const Ta zp = s * rz; // own-frame z
-
-    const Ta r2    = rx * rx + ry * ry + zp * zp;
-    const Ta rinv  = inverseSquareRoot(r2);
-    const Ta rinv2 = rinv * rinv;
-    const Ta rinv3 = rinv * rinv2;
-    const Ta rinv5 = rinv3 * rinv2;
 
     // Laplace monopole, dipole and quadrupole in the own frame (acceleration convention, as M2P)
-    const Ta mass = M[Hqi::mass];
-    const Ta Qrx  = rx * M[Hqi::sxx] + ry * M[Hqi::sxy] + zp * M[Hqi::sxz];
-    const Ta Qry  = rx * M[Hqi::sxy] + ry * M[Hqi::syy] + zp * M[Hqi::syz];
-    const Ta Qrz  = rx * M[Hqi::sxz] + ry * M[Hqi::syz] + zp * M[Hqi::szz];
-    const Ta rQr  = rx * Qrx + ry * Qry + zp * Qrz;
-    const Ta rQrAndMonopole = (Ta(-2.5) * rQr * rinv5 - mass * rinv) * rinv2;
-    const Ta PR   = rx * M[Hqi::px] + ry * M[Hqi::py] + zp * M[Hqi::pz];
-    const Ta ax   = rinv5 * Qrx + rQrAndMonopole * rx + rinv5 * (M[Hqi::px] * r2 - Ta(3) * PR * rx);
-    const Ta ay   = rinv5 * Qry + rQrAndMonopole * ry + rinv5 * (M[Hqi::py] * r2 - Ta(3) * PR * ry);
-    const Ta az   = rinv5 * Qrz + rQrAndMonopole * zp + rinv5 * (M[Hqi::pz] * r2 - Ta(3) * PR * zp);
+    const auto L   = ownFrameMDQ<Exact>(rx, ry, rz, s, M[Hqi::mass], &M[Hqi::px], &M[Hqi::sxx]);
+    const Ta zp    = L.zp, r2 = L.r2, rinv2 = L.rinv2, rinv3 = L.rinv3, rinv5 = L.rinv5;
+    const Ta az    = L.az;
     // tree frame: E~_perp = s E_L,perp, E~_z = E_L,z
-    const Ta sax = s * ax, say = s * ay;
+    const Ta sax = s * L.ax, say = s * L.ay;
 
     // rapidity terms on the unit monopole field E0 = s R / r'^3 (field convention)
     const Ta beta = M[Hqi::beta];
