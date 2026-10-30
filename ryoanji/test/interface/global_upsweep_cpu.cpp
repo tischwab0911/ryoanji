@@ -31,15 +31,13 @@ static int multipoleExchangeTest(int thisRank, int numRanks)
     const LocalIndex numParticles    = 1000 * numRanks;
     unsigned         bucketSize      = 64;
     unsigned         bucketSizeLocal = 16;
-    float            theta           = 10.0;
+    float            theta           = 1.0;
 
-    cstone::Box<T> box{-1, 1};
+    cstone::Box<T> box(-1, 1, cstone::BoundaryType::fixed);
 
     // common pool of coordinates, identical on all ranks
     cstone::RandomGaussianCoordinates<T, cstone::SfcKind<KeyType>> coords(numRanks * numParticles, box);
-
-    std::vector<T> globalH(numRanks * numParticles, 0.1);
-    adjustSmoothingLength<KeyType>(globalH.size(), 5, 10, coords.x(), coords.y(), coords.z(), globalH, box);
+    coords.adjustH(5, 10);
 
     std::vector<T> globalMasses(numRanks * numParticles, 1.0 / (numRanks * numParticles));
 
@@ -51,12 +49,13 @@ static int multipoleExchangeTest(int thisRank, int numRanks)
     std::vector<T> x(coords.x().begin() + firstIndex, coords.x().begin() + lastIndex);
     std::vector<T> y(coords.y().begin() + firstIndex, coords.y().begin() + lastIndex);
     std::vector<T> z(coords.z().begin() + firstIndex, coords.z().begin() + lastIndex);
-    std::vector<T> h(globalH.begin() + firstIndex, globalH.begin() + lastIndex);
+    std::vector<T> h(coords.h().begin() + firstIndex, coords.h().begin() + lastIndex);
     std::vector<T> m(globalMasses.begin() + firstIndex, globalMasses.begin() + lastIndex);
 
     std::vector<KeyType> particleKeys(x.size());
 
-    cstone::Domain<KeyType, T> domain(thisRank, numRanks, bucketSize, bucketSizeLocal, theta, box);
+    cstone::Domain<KeyType, T> domain(cstone::execution::cpu, thisRank, numRanks, bucketSize, bucketSizeLocal, theta,
+                                      MPI_COMM_WORLD, box);
 
     std::vector<T> s1, s2, s3;
     domain.syncGrav(particleKeys, x, y, z, h, m, std::tuple{}, std::tie(s1, s2, s3));
@@ -103,7 +102,7 @@ static int multipoleExchangeTest(int thisRank, int numRanks)
 
 int main(int argc, char** argv)
 {
-    MPI_Init(NULL, NULL);
+    MPI_Init(&argc, &argv);
 
     int rank = 0, numRanks = 0;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);

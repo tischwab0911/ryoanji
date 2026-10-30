@@ -23,14 +23,15 @@ namespace cstone
 
 /*! @brief exchange halo request keys, establish particle indices to send
  *
- * @tparam KeyType      32- or 64-bit unsigned integer
- * @param treeLeaves    cornerstone octree leaves, length N+1
- * @param assignment    assignment of @p treeLeaves to ranks, only ranks listed in @p peerRanks
- *                      are accessed
- * @param peerRanks     list of peer rank IDs
- * @param layout        particle location (index in buffers) of each node in @a treeLeaves
- * @return              a SendList, containing ranges of local particle indices to send out
- *                      to each peer rank in subsequent halo particle exchanges.
+ * @tparam KeyType       32- or 64-bit unsigned integer
+ * @param treeLeaves     cornerstone octree leaves, length N+1
+ * @param assignment     assignment of @p treeLeaves to ranks, only ranks listed in @p peerRanks
+ *                       are accessed
+ * @param exteriorRanks  list of exterior peer rank IDs
+ * @param interiorRanks  list of interior peer rank IDs
+ * @param layout         particle location (index in buffers) of each node in @a treeLeaves
+ * @return               a SendList, containing ranges of local particle indices to send out
+ *                       to each peer rank in subsequent halo particle exchanges.
  *
  * Preconditions:
  *
@@ -44,20 +45,22 @@ namespace cstone
 template<class KeyType>
 SendList exchangeRequestKeys(std::span<const KeyType> treeLeaves,
                              std::span<const TreeIndexPair> assignment,
-                             std::span<const int> peerRanks,
-                             std::span<const LocalIndex> layout)
+                             std::span<const int> exteriorRanks,
+                             std::span<const int> interiorRanks,
+                             std::span<const LocalIndex> layout,
+                             MPI_Comm comm)
 {
     std::vector<std::vector<KeyType>> sendBuffers;
-    sendBuffers.reserve(peerRanks.size());
+    sendBuffers.reserve(exteriorRanks.size());
 
     std::vector<MPI_Request> sendRequests;
 
     constexpr int haloRequestKeyTag = static_cast<int>(P2pTags::haloRequestKeys);
 
-    for (int peer : peerRanks)
+    for (int peer : exteriorRanks)
     {
         auto requestKeys = extractMarkedElements(treeLeaves, layout, assignment[peer].start(), assignment[peer].end());
-        mpiSendAsync(requestKeys.data(), int(requestKeys.size()), peer, haloRequestKeyTag, sendRequests);
+        mpiSendAsync(requestKeys.data(), int(requestKeys.size()), peer, haloRequestKeyTag, sendRequests, comm);
         sendBuffers.push_back(std::move(requestKeys));
     }
 
@@ -65,11 +68,11 @@ SendList exchangeRequestKeys(std::span<const KeyType> treeLeaves,
 
     SendList ret(assignment.size());
 
-    size_t numMessages = peerRanks.size();
-    while (numMessages > 0)
+    int numMessages = int(interiorRanks.size());
+    while (numMessages--)
     {
         MPI_Status status;
-        mpiRecvSync(receiveBuffer.data(), receiveBuffer.size(), MPI_ANY_SOURCE, haloRequestKeyTag, &status);
+        mpiRecvSync(receiveBuffer.data(), receiveBuffer.size(), MPI_ANY_SOURCE, haloRequestKeyTag, &status, comm);
         int receiveRank = status.MPI_SOURCE;
         TreeNodeIndex numKeys;
         MPI_Get_count(&status, MpiType<KeyType>{}, &numKeys);
@@ -84,12 +87,9 @@ SendList exchangeRequestKeys(std::span<const KeyType> treeLeaves,
 
             ret[receiveRank].addRange(lowerIdx, upperIdx);
         }
-
-        numMessages--;
     }
 
-    MPI_Status status[sendRequests.size()];
-    MPI_Waitall(int(sendRequests.size()), sendRequests.data(), status);
+    MPI_Waitall(int(sendRequests.size()), sendRequests.data(), MPI_STATUSES_IGNORE);
 
     // MUST call MPI_Barrier or any other collective MPI operation that enforces synchronization
     // across all ranks before calling this function again

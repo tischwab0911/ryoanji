@@ -24,7 +24,8 @@
 #include "ryoanji/interface/multipole_holder.cuh"
 #include "ryoanji/nbody/cartesian_qpole.hpp"
 
-using AccType = cstone::GpuTag;
+using Exec          = cstone::execution::Gpu;
+constexpr Exec exec = cstone::execution::gpuDefaultStream;
 
 using namespace ryoanji;
 
@@ -50,7 +51,8 @@ void ryoanjiTest(int thisRank, int numRanks, size_t numParticlesGlobal)
     std::vector<T> h(numParticles, hmean);
     std::vector<T> m(numParticles, 1.0f / float(numParticlesGlobal));
 
-    cstone::Domain<KeyType, T, AccType> domain(thisRank, numRanks, bucketSizeGlobal, bucketSizeFocus, theta, box);
+    cstone::Domain<KeyType, T, Exec> domain(exec, thisRank, numRanks, bucketSizeGlobal, bucketSizeFocus, theta,
+                                            MPI_COMM_WORLD, box);
 
     // upload particles to GPU
     cstone::DeviceVector<KeyType> d_keys = std::vector<KeyType>(numParticles);
@@ -71,16 +73,14 @@ void ryoanjiTest(int thisRank, int numRanks, size_t numParticlesGlobal)
     cstone::DeviceVector<T> d_az = std::vector<T>(domain.nParticlesWithHalos());
 
     //! includes tree plus associated information, like nearby ranks, assignment, counts, MAC spheres, etc
-    const cstone::FocusedOctree<KeyType, T, cstone::GpuTag>& focusTree = domain.focusTree();
-    //! the focused octree on GPU, structure only
-    auto octree = focusTree.octreeViewAcc();
+    const cstone::FocusedOctree<KeyType, T, cstone::execution::Gpu>& focusTree = domain.focusTree();
 
     MultipoleHolder<T, T, T, T, T, KeyType, MultipoleType> multipoleHolder;
 
-    auto grp = multipoleHolder.computeSpatialGroups(domain.startIndex(), domain.endIndex(), rawPtr(d_x), rawPtr(d_y),
-                                                    rawPtr(d_z), rawPtr(d_h), domain.focusTree(),
-                                                    domain.layout().data(), domain.box());
-    multipoleHolder.upsweep(rawPtr(d_x), rawPtr(d_y), rawPtr(d_z), rawPtr(d_m), domain.globalTree(), domain.focusTree(),
+    auto grp =
+        multipoleHolder.computeSpatialGroups(domain.startIndex(), domain.endIndex(), rawPtr(d_x), rawPtr(d_y),
+                                             rawPtr(d_z), rawPtr(d_h), focusTree, domain.layout().data(), domain.box());
+    multipoleHolder.upsweep(rawPtr(d_x), rawPtr(d_y), rawPtr(d_z), rawPtr(d_m), domain.globalTree(), focusTree,
                             domain.layout().data());
 
     auto t0 = std::chrono::high_resolution_clock::now();

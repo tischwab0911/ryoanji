@@ -20,6 +20,8 @@
 #include "cstone/domain/exchange_keys.hpp"
 #include "cstone/domain/index_ranges.hpp"
 #include "cstone/halos/exchange_halos.hpp"
+#include "cstone/halos/halo_peers.hpp"
+#include "cstone/primitives/primitives_acc.hpp"
 #ifdef USE_CUDA
 #include "cstone/halos/exchange_halos_gpu.cuh"
 #endif
@@ -33,14 +35,17 @@ void haloExchangeGpu(int epoch,
                      const SendList& outgoingHalos,
                      DevVec1& sendScratchBuffer,
                      DevVec2& receiveScratchBuffer,
+                     MPI_Comm comm,
+                     execution::Gpu exec,
                      Arrays... arrays);
 
-template<class KeyType, class Accelerator>
+template<class KeyType>
 class Halos
 {
 public:
-    Halos(int myRank)
+    Halos(int myRank, MPI_Comm comm)
         : myRank_(myRank)
+        , comm_(comm)
     {
     }
 
@@ -48,7 +53,6 @@ public:
      *
      * @param[in]  leaves      (focus) tree leaves
      * @param[in]  assignment  assignment of @p leaves to ranks
-     * @param[in]  peers       list of peer ranks
      * @param[out] layout      Particle offsets for each node in @p leaves w.r.t to the final particle buffers,
      *                         including the halos, length = counts.size() + 1. The last element contains
      *                         the total number of locally present particles, i.e. assigned + halos.
@@ -57,21 +61,22 @@ public:
      *                         and the corresponding layout range has length zero.
      * @return                 0 if all halo cells have been matched with a peer rank, 1 otherwise
      */
-    int exchangeRequests(std::span<const KeyType> leaves,
-                         std::span<const TreeIndexPair> assignment,
-                         std::span<const int> peers,
-                         std::span<const LocalIndex> layout)
+    void exchangeRequests(std::span<const KeyType> leaves,
+                          std::span<const TreeIndexPair> assignment,
+                          std::span<const LocalIndex> layout)
     {
-        outgoingHaloIndices_ = exchangeRequestKeys<KeyType>(leaves, assignment, peers, layout);
+        auto exteriorPeerFlags = haloPeers(myRank_, layout, assignment);
+        exchangePeers(exteriorPeerFlags, exteriorPeers_, interiorPeers_, comm_);
+
+        outgoingHaloIndices_ =
+            exchangeRequestKeys<KeyType>(leaves, assignment, exteriorPeers_, interiorPeers_, layout, comm_);
 
         incomingHaloIndices_.resize(assignment.size());
         std::fill(incomingHaloIndices_.begin(), incomingHaloIndices_.end(), RecvList::value_type{0, 0});
-        for (int peer : peers)
+        for (int peer : exteriorPeers_)
         {
             incomingHaloIndices_[peer] = {layout[assignment[peer].start()], layout[assignment[peer].end()]};
         }
-
-        return 0;
     }
 
     /*! @brief repeat the halo exchange pattern from the previous sync operation for a different set of arrays
@@ -82,32 +87,38 @@ public:
      * Note that if the ScratchVectors are on device, all arrays need to be on the device too.
      */
     template<class Scratch1, class Scratch2, class... Vectors>
-    void exchangeHalos(std::tuple<Vectors&...> arrays, Scratch1& sendBuffer, Scratch2& receiveBuffer) const
+    void exchangeHalos(execution::Cpu, std::tuple<Vectors&...> arrays, Scratch1&, Scratch2&) const
     {
-        if constexpr (HaveGpu<Accelerator>{})
-        {
-            static_assert(IsDeviceVector<Scratch1>{} && IsDeviceVector<Scratch2>{});
-            std::apply(
-                [this, &sendBuffer, &receiveBuffer](auto&... arrays)
-                {
-                    haloExchangeGpu(haloEpoch_++, incomingHaloIndices_, outgoingHaloIndices_, sendBuffer, receiveBuffer,
-                                    rawPtr(arrays)...);
-                },
-                arrays);
-        }
-        else
-        {
-            std::apply([this](auto&... arrays)
-                       { haloexchange(haloEpoch_++, incomingHaloIndices_, outgoingHaloIndices_, rawPtr(arrays)...); },
-                       arrays);
-        }
+        std::apply(
+            [this](auto&... arrays)
+            { haloexchange(haloEpoch_++, incomingHaloIndices_, outgoingHaloIndices_, comm_, rawPtr(arrays)...); },
+            arrays);
+    }
+
+    template<class Scratch1, class Scratch2, class... Vectors>
+    void exchangeHalos(execution::Gpu exec,
+                       std::tuple<Vectors&...> arrays,
+                       Scratch1& sendBuffer,
+                       Scratch2& receiveBuffer) const
+    {
+        static_assert(IsDeviceVector<Scratch1>{} && IsDeviceVector<Scratch2>{});
+        std::apply(
+            [this, &sendBuffer, &receiveBuffer, exec](auto&... arrays)
+            {
+                haloExchangeGpu(haloEpoch_++, incomingHaloIndices_, outgoingHaloIndices_, sendBuffer, receiveBuffer,
+                                comm_, exec, rawPtr(arrays)...);
+            },
+            arrays);
     }
 
 private:
     int myRank_;
+    MPI_Comm comm_;
 
     RecvList incomingHaloIndices_;
     SendList outgoingHaloIndices_;
+
+    std::vector<int> exteriorPeers_, interiorPeers_;
 
     /*! @brief Counter for halo exchange calls
      * Multiple client calls to domain::exchangeHalos() during a time-step

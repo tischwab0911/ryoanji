@@ -6,7 +6,7 @@ add_subdirectory(sfc)
 add_subdirectory(traversal)
 add_subdirectory(tree)
 
-if (CMAKE_CUDA_COMPILER OR CMAKE_HIP_COMPILER)
+if (CSTONE_WITH_CUDA OR CSTONE_WITH_HIP)
     add_library(cstone_gpu $<TARGET_OBJECTS:gather_halos_obj>
                            $<TARGET_OBJECTS:octree_obj>
                            $<TARGET_OBJECTS:primitives_gpu_obj>
@@ -18,4 +18,5 @@ if (CMAKE_CUDA_COMPILER OR CMAKE_HIP_COMPILER)
     if (CSTONE_WITH_GPU_AWARE_MPI)
         target_compile_definitions(cstone_gpu INTERFACE CSTONE_HAVE_GPU_AWARE_MPI)
     endif()
+    target_include_directories(cstone_gpu INTERFACE ${PROJECT_SOURCE_DIR}/include)
 endif ()

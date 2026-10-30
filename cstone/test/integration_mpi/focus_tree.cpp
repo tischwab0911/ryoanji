@@ -16,7 +16,6 @@
 #include <mpi.h>
 #include <gtest/gtest.h>
 
-#include "cstone/traversal/peers.hpp"
 #include "cstone/focus/octree_focus_mpi.hpp"
 
 #include "coord_samples/random.hpp"
@@ -53,31 +52,22 @@ void globalRandomGaussian(int thisRank, int numRanks)
     // common pool of coordinates, identical on all ranks
     RandomGaussianCoordinates<T, SfcKind<KeyType>> coords(numRanks * numParticles, box);
 
-    auto [tree, counts] = computeOctree(std::span(coords.particleKeys()), bucketSize);
+    auto [leaves, counts] = computeOctree(std::span(coords.particleKeys()), bucketSize);
 
-    Octree<KeyType> domainTree;
-    domainTree.update(tree.data(), nNodes(tree));
+    OctreeData<KeyType, execution::Cpu> domainTree;
+    domainTree.resize(nNodes(leaves));
+    updateInternalTree<KeyType>(leaves, domainTree.data());
 
-    auto assignment = makeSfcAssignment(numRanks, counts, tree.data());
+    auto assignment = makeSfcAssignment(numRanks, counts, leaves.data());
 
     /*******************************/
-
-    auto peers = findPeersMac(thisRank, assignment, domainTree.cdata(), box, invThetaEff);
-
-    // peer boundaries are required to be present in the focus tree at all times
-    std::vector<KeyType> peerBoundaries;
-    for (auto peer : peers)
-    {
-        peerBoundaries.push_back(assignment[peer]);
-        peerBoundaries.push_back(assignment[peer + 1]);
-    }
 
     KeyType focusStart = assignment[thisRank];
     KeyType focusEnd   = assignment[thisRank + 1];
 
     // build the reference focus tree from the common pool of coordinates, focused on the executing rank
     FocusedOctreeSingleNode<KeyType> referenceFocusTree(bucketSizeLocal, theta);
-    while (!referenceFocusTree.update(box, coords.particleKeys(), focusStart, focusEnd, peerBoundaries))
+    while (!referenceFocusTree.update(box, coords.particleKeys(), focusStart, focusEnd, {}))
         ;
 
     /*******************************/
@@ -105,14 +95,14 @@ void globalRandomGaussian(int thisRank, int numRanks)
     std::vector<KeyType> particleKeys(lastAssignedIndex - firstAssignedIndex);
     computeSfcKeys(x.data(), y.data(), z.data(), sfcKindPointer(particleKeys.data()), x.size(), box);
 
-    FocusedOctree<KeyType, T> focusTree(thisRank, numRanks, bucketSizeLocal);
+    FocusedOctree<KeyType, T> focusTree(execution::cpu, thisRank, numRanks, bucketSizeLocal, MPI_COMM_WORLD);
     std::vector<int, util::DefaultInitAdaptor<int>> scratch;
 
     int converged = 0;
     while (converged != numRanks)
     {
-        converged = focusTree.updateTree(peers, assignment, domainTree.treeLeaves(), box, scratch);
-        focusTree.updateCounts(particleKeys, tree, counts, scratch);
+        converged = focusTree.updateTree(assignment, leaves, box, scratch);
+        focusTree.updateCounts(particleKeys, leaves, counts, scratch);
         focusTree.updateMinMac(assignment, invThetaEff, false);
         MPI_Allreduce(MPI_IN_PLACE, &converged, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
 
@@ -121,11 +111,12 @@ void globalRandomGaussian(int thisRank, int numRanks)
         LocalIndex totalCount = std::accumulate(focusCounts.begin(), focusCounts.end(), LocalIndex(0));
         EXPECT_EQ(totalCount, numParticles * numRanks);
 
-        // peer boundaries must always be resolved at any convergence state
-        for (auto key : peerBoundaries)
+        // focus boundaries must always be resolved at any convergence state
         {
-            LocalIndex idx = findNodeAbove(focusTree.treeLeaves().data(), focusTree.treeLeaves().size(), key);
-            EXPECT_EQ(key, focusTree.treeLeaves()[idx]);
+            LocalIndex idx = findNodeAbove(focusTree.treeLeaves().data(), focusTree.treeLeaves().size(), focusStart);
+            EXPECT_EQ(focusStart, focusTree.treeLeaves()[idx]);
+            idx = findNodeAbove(focusTree.treeLeaves().data(), focusTree.treeLeaves().size(), focusEnd);
+            EXPECT_EQ(focusEnd, focusTree.treeLeaves()[idx]);
         }
     }
 
@@ -136,7 +127,7 @@ void globalRandomGaussian(int thisRank, int numRanks)
                            referenceFocusTree.leafCounts().begin()));
 }
 
-TEST(GlobalTreeDomain, randomGaussian)
+TEST(OctreeFocusLET, randomGaussian)
 {
     int rank = 0, nRanks = 0;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);

@@ -34,15 +34,13 @@ static int multipoleHolderTest(int thisRank, int numRanks)
     const LocalIndex numParticles    = 1000 * numRanks;
     unsigned         bucketSize      = 64;
     unsigned         bucketSizeLocal = 16;
-    float            theta           = 10.0;
+    float            theta           = 1.0;
 
-    cstone::Box<T> box{-1, 1};
+    cstone::Box<T> box(-1, 1, cstone::BoundaryType::fixed);
 
     // common pool of coordinates, identical on all ranks
     cstone::RandomGaussianCoordinates<T, cstone::SfcKind<KeyType>> coords(numRanks * numParticles, box);
-
-    std::vector<T> globalH(numRanks * numParticles, 0.1);
-    adjustSmoothingLength<KeyType>(globalH.size(), 5, 10, coords.x(), coords.y(), coords.z(), globalH, box);
+    coords.adjustH(5, 10);
 
     std::vector<T> globalMasses(numRanks * numParticles, 1.0 / (numRanks * numParticles));
 
@@ -54,12 +52,13 @@ static int multipoleHolderTest(int thisRank, int numRanks)
     std::vector<T> x(coords.x().begin() + firstIndex, coords.x().begin() + lastIndex);
     std::vector<T> y(coords.y().begin() + firstIndex, coords.y().begin() + lastIndex);
     std::vector<T> z(coords.z().begin() + firstIndex, coords.z().begin() + lastIndex);
-    std::vector<T> h(globalH.begin() + firstIndex, globalH.begin() + lastIndex);
+    std::vector<T> h(coords.h().begin() + firstIndex, coords.h().begin() + lastIndex);
     std::vector<T> m(globalMasses.begin() + firstIndex, globalMasses.begin() + lastIndex);
 
     std::vector<KeyType> particleKeys(x.size());
 
-    cstone::Domain<KeyType, T, cstone::GpuTag> domain(thisRank, numRanks, bucketSize, bucketSizeLocal, theta, box);
+    cstone::Domain<KeyType, T, cstone::execution::Gpu> domain(cstone::execution::gpuDefaultStream, thisRank, numRanks,
+                                                              bucketSize, bucketSizeLocal, theta, MPI_COMM_WORLD, box);
 
     MultipoleHolder<T, T, T, T, T, KeyType, MultipoleType> multipoleHolder;
 
@@ -70,7 +69,7 @@ static int multipoleHolderTest(int thisRank, int numRanks)
     domain.exchangeHalos(std::tie(d_m), s1, s2);
 
     //! includes tree plus associated information, like peer ranks, assignment, counts, centers, etc
-    const cstone::FocusedOctree<KeyType, T, cstone::GpuTag>& focusTree = domain.focusTree();
+    const cstone::FocusedOctree<KeyType, T, cstone::execution::Gpu>& focusTree = domain.focusTree();
     //! the focused octree, structure only
     auto octree = focusTree.octreeViewAcc();
 
@@ -80,14 +79,15 @@ static int multipoleHolderTest(int thisRank, int numRanks)
     // Check the root multipole of the distributed tree
     bool passMultipole = false;
     {
-        std::vector<MultipoleType> multipoles(octree.numNodes);
-        memcpyD2H(multipoleHolder.deviceMultipoles(), multipoles.size(), multipoles.data());
-
-        MultipoleType globalRootMultipole = multipoles[0];
-
+        std::vector<MultipoleType>               multipoles(octree.numNodes);
         auto                                     d_centers = focusTree.expansionCentersAcc();
         std::vector<cstone::SourceCenterType<T>> centers(d_centers.size());
-        memcpyD2H(d_centers.data(), d_centers.size(), centers.data());
+        cstone::memcpyD2HAsync(cstone::execution::gpuDefaultStream, multipoleHolder.deviceMultipoles(),
+                               multipoles.size(), multipoles.data());
+        cstone::memcpyD2HAsync(cstone::execution::gpuDefaultStream, d_centers.data(), d_centers.size(), centers.data());
+        cstone::syncGpu(cstone::execution::gpuDefaultStream);
+
+        MultipoleType globalRootMultipole = multipoles[0];
 
         // compute reference root cell multipole from global particle data
         MultipoleType reference;
@@ -114,7 +114,7 @@ static int multipoleHolderTest(int thisRank, int numRanks)
 
 int main(int argc, char** argv)
 {
-    MPI_Init(NULL, NULL);
+    MPI_Init(&argc, &argv);
 
     int rank = 0, numRanks = 0;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);

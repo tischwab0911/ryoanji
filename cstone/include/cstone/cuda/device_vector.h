@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -48,6 +49,12 @@ public:
 
     T* data();
     const T* data() const;
+
+    T* begin();
+    const T* cbegin() const;
+
+    T* end();
+    const T* cend() const;
 
     void resize(std::size_t size);
 
@@ -87,8 +94,6 @@ extern template class DeviceVector<util::array<double, 3>>;
 extern template class DeviceVector<util::array<float, 4>>;
 extern template class DeviceVector<util::array<double, 4>>;
 
-} // namespace cstone
-
 template<class T>
 T* rawPtr(cstone::DeviceVector<T>& p)
 {
@@ -100,3 +105,5 @@ const T* rawPtr(const cstone::DeviceVector<T>& p)
 {
     return p.data();
 }
+
+} // namespace cstone
