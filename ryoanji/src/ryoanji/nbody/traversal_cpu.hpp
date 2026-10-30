@@ -256,7 +256,7 @@ void directSum(const Tc* x, const Tc* y, const Tc* z, const Th* h, const Tm* m, 
 #endif
                     for (LocalIndex s = 0; s < numParticles; ++s)
                     {
-                        acc = P2P(acc, targetRepl, Vec3<Tc>{x[s], y[s], z[s]}, m[s], target_h, h[s]);
+                        acc = P2P<true>(acc, targetRepl, Vec3<Tc>{x[s], y[s], z[s]}, m[s], target_h, h[s]);
                     }
                 }
             }
@@ -291,7 +291,7 @@ void directSumHeavisideCpu(LocalIndex first, LocalIndex last, LocalIndex numBodi
         Vec3<T>           target{x[t], y[t], z[t]};
         for (LocalIndex j = 0; j < numBodies; ++j)
         {
-            acc = P2PHeaviside(acc, target, Vec3<T>{x[j], y[j], z[j]}, m[j], s[j], chi[j], h[t], h[j]);
+            acc = P2PHeaviside<true>(acc, target, Vec3<T>{x[j], y[j], z[j]}, m[j], s[j], chi[j], h[t], h[j]);
         }
         ex[t] += acc[0];
         ey[t] += acc[1];

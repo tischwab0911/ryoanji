@@ -69,7 +69,7 @@ __global__ void directKernel(unsigned first, unsigned last, unsigned numSource, 
             T       q_j = sm_bodytile[j][3];
             T       h_j = sm_bodytile[j][4];
 
-            acc = P2P(acc, pos_i, pos_j, q_j, h_i, h_j);
+            acc = P2P<true>(acc, pos_i, pos_j, q_j, h_i, h_j);
         }
 
         __syncthreads();
@@ -147,7 +147,7 @@ __global__ void directHeavisideKernel(unsigned first, unsigned last, unsigned nu
         for (unsigned j = 0; j < blockDim.x; ++j)
         {
             Vec3<T> pos_j{sm_bodytile[j][0], sm_bodytile[j][1], sm_bodytile[j][2]};
-            acc = P2PHeaviside(acc, pos_i, pos_j, sm_bodytile[j][3], sm_bodytile[j][5], sm_bodytile[j][6], h_i,
+            acc = P2PHeaviside<true>(acc, pos_i, pos_j, sm_bodytile[j][3], sm_bodytile[j][5], sm_bodytile[j][6], h_i,
                                sm_bodytile[j][4]);
         }
 
