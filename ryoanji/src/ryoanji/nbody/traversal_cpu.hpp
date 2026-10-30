@@ -254,7 +254,7 @@ void directSum(const Tc* x, const Tc* y, const Tc* z, const Th* h, const Tm* m, 
 #endif
                     for (LocalIndex s = 0; s < numParticles; ++s)
                     {
-                        acc = P2P(acc, targetRepl, Vec3<Tc>{x[s], y[s], z[s]}, m[s], target_h, h[s]);
+                        acc = P2P<true>(acc, targetRepl, Vec3<Tc>{x[s], y[s], z[s]}, m[s], target_h, h[s]);
                     }
                 }
             }

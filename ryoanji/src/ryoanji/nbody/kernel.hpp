@@ -52,6 +52,38 @@ HOST_DEVICE_FUN HOST_DEVICE_INLINE double inverseSquareRoot(double x)
 #endif
 }
 
+/*! @brief 1 / sqrt(x) to the precision of the type, for direct sums that serve as accuracy references
+ *
+ * inverseSquareRoot evaluates in single precision also for double arguments (fast, and far below the error of the
+ * multipole approximation); a direct sum is the reference that tree errors are measured against, so it keeps the
+ * full precision of its type. (IPPL/OPAL-X fork addition.)
+ */
+HOST_DEVICE_FUN HOST_DEVICE_INLINE float inverseSquareRootExact(float x)
+{
+#if defined(__HIP_DEVICE_COMPILE__) || defined(__CUDA_ARCH__)
+    return rsqrtf(x);
+#else
+    return 1.0f / std::sqrt(x);
+#endif
+}
+
+HOST_DEVICE_FUN HOST_DEVICE_INLINE double inverseSquareRootExact(double x)
+{
+#if defined(__HIP_DEVICE_COMPILE__) || defined(__CUDA_ARCH__)
+    return rsqrt(x);
+#else
+    return 1.0 / std::sqrt(x);
+#endif
+}
+
+//! @brief inverseSquareRoot, or inverseSquareRootExact for direct sums (@p Exact)
+template<bool Exact, class T>
+HOST_DEVICE_FUN HOST_DEVICE_INLINE T inverseSquareRootOf(T x)
+{
+    if constexpr (Exact) { return inverseSquareRootExact(x); }
+    else { return inverseSquareRoot(x); }
+}
+
 /*! @brief interaction between two particles
  *
  * @param acc     acceleration to add to
@@ -61,8 +93,10 @@ HOST_DEVICE_FUN HOST_DEVICE_INLINE double inverseSquareRoot(double x)
  * @param h_i
  * @param h_j
  * @return        input acceleration plus contribution from this call
+ *
+ * @tparam Exact  full-precision 1 / sqrt (direct sums), else the fast single-precision one (tree traversal)
  */
-template<class Ta, class Tc, class Th, class Tm>
+template<bool Exact = false, class Ta, class Tc, class Th, class Tm>
 HOST_DEVICE_FUN DEVICE_INLINE Vec4<Ta> P2P(Vec4<Ta> acc, const Vec3<Tc>& pos_i, const Vec3<Tc>& pos_j, Tm m_j, Th h_i,
                                            Th h_j)
 {
@@ -73,7 +107,7 @@ HOST_DEVICE_FUN DEVICE_INLINE Vec4<Ta> P2P(Vec4<Ta> acc, const Vec3<Tc>& pos_i, 
     Th h_ij2 = h_ij * h_ij;
     Tc R2eff = (R2 < h_ij2) ? h_ij2 : R2;
 
-    Tc invR   = inverseSquareRoot(R2eff);
+    Tc invR   = inverseSquareRootOf<Exact>(R2eff);
     Tc invR2  = invR * invR;
     Tc invR3m = m_j * invR * invR2;
 

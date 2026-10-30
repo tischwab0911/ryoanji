@@ -69,7 +69,7 @@ __global__ void directKernel(unsigned first, unsigned last, unsigned numSource, 
             T       q_j = sm_bodytile[j][3];
             T       h_j = sm_bodytile[j][4];
 
-            acc = P2P(acc, pos_i, pos_j, q_j, h_i, h_j);
+            acc = P2P<true>(acc, pos_i, pos_j, q_j, h_i, h_j);
         }
 
         __syncthreads();
