@@ -141,6 +141,23 @@ iSfcKey(unsigned ix, unsigned iy, unsigned iz, const AxesBits& axesBits)
     return KeyType{iHilbert<typename KeyType::ValueType>(ix, iy, iz, axesBits[0], axesBits[1], axesBits[2])};
 }
 
+/*! @brief integer cell coordinate floor((x - xmin) * m) of @p x, with x * m and xmin * m each rounded once
+ *
+ * IPPL/OPAL-X fork patch (keep on sphexa syncs). The products are split into integer and fractional parts, which
+ * subtract exactly, so a point just below a cell boundary stays below it (the reason for upstream's
+ * floor(x * m) - xmin * m, sphexa ad9c00c0). Upstream's form is one cell too low whenever the fractional parts of
+ * x * m and -xmin * m add up to 1 or more, i.e. for boxes with xmin * m not an integer (boxes fitted to a bunch):
+ * the cell of the key then does not contain the point, and the locally essential tree, built from the cell boxes,
+ * misses cells that fail the MAC for such a point.
+ */
+template<class T>
+HOST_DEVICE_FUN inline int sfcCellIndex(T x, T xmin, T m)
+{
+    const T a = x * m, b = xmin * m;
+    const T fa = std::floor(a), fb = std::floor(b);
+    return int(fa - fb) - int(a - fa < b - fb);
+}
+
 template<class KeyType, class T>
 HOST_DEVICE_FUN inline KeyType sfc3D(T x, T y, T z, T xmin, T ymin, T zmin, T mx, T my, T mz, const AxesBits& axesBits)
 {
@@ -148,9 +165,9 @@ HOST_DEVICE_FUN inline KeyType sfc3D(T x, T y, T z, T xmin, T ymin, T zmin, T mx
     const int mcoord_y = (1u << axesBits[1]) - 1;
     const int mcoord_z = (1u << axesBits[2]) - 1;
 
-    int ix = std::floor(x * mx) - xmin * mx;
-    int iy = std::floor(y * my) - ymin * my;
-    int iz = std::floor(z * mz) - zmin * mz;
+    int ix = sfcCellIndex(x, xmin, mx);
+    int iy = sfcCellIndex(y, ymin, my);
+    int iz = sfcCellIndex(z, zmin, mz);
 
     ix = stl::min(ix, mcoord_x);
     iy = stl::min(iy, mcoord_y);
